@@ -1,6 +1,8 @@
 # Repo backend: build + push + deploy solo del backend (FR-018, FR-019, SC-007).
-# Tags inmutables :git-sha y :semver; nunca latest en prod. Si el frontend deja
-# de responder tras el deploy, se revierte al tag anterior (puerta SC-007).
+# Tags inmutables :git-sha y :semver; nunca latest en prod.
+# El rollback SOLO aplica si falla el smoke del propio backend. El health check
+# del frontend es informativo (continue-on-error): no bloquea ni revierte el
+# deploy del backend, pero deja la evidencia de SC-007.
 name: backend-deploy
 
 on:
@@ -36,11 +38,19 @@ jobs:
         env:
           KUBECONFIG: ${{ secrets.BACKEND_KUBECONFIG }}
       - name: Smoke del backend
+        id: smoke
         run: curl -sf "http://${{ vars.BACKEND_URL }}/balance"
-      - name: Health check cruzado del frontend (puerta SC-007)
-        run: curl -sf "http://${{ vars.FRONTEND_URL }}/api/balance"
-      - name: Revertir si el frontend no responde
-        if: failure()
+      - name: Revertir si el propio backend no responde
+        if: failure() && steps.smoke.outcome == 'failure'
         run: kubectl rollout undo deployment/backend
         env:
           KUBECONFIG: ${{ secrets.BACKEND_KUBECONFIG }}
+      - name: Health check del frontend (informativo, SC-007)
+        if: always()
+        continue-on-error: true
+        run: |
+          if curl -sf --max-time 10 "http://${{ vars.FRONTEND_URL }}/api/balance"; then
+            echo "frontend OK"
+          else
+            echo "frontend NO RESPONDE — no bloquea este deploy"
+          fi

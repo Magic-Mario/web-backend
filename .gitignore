@@ -1,0 +1,22 @@
+# Python (gestionado por uv)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+grpc_adapter/_generated/
+
+# Build
+dist/
+build/
+*.log
+
+# Entorno y editores
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.tmp

@@ -1,0 +1,58 @@
+// Contrato gRPC interno del servicio de finanzas.
+// Versionado por paquete: finance.v1. Cambios incompatibles crean finance.v2.
+//
+// DECLARADO para futuros microservicios internos. NO se despliega en v1
+// (ver constitution, principio III; spec FR-012).
+syntax = "proto3";
+
+package finance.v1;
+
+option go_package = "cloud-project/apps/proto/financev1;financev1";
+
+// FinanceService es la superficie interna del backend de finanzas.
+service FinanceService {
+  // Registra un ingreso o un gasto.
+  rpc CreateMovement(CreateMovementRequest) returns (CreateMovementResponse);
+
+  // Lista los movimientos registrados.
+  rpc ListMovements(ListMovementsRequest) returns (ListMovementsResponse);
+
+  // Devuelve el saldo calculado.
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+}
+
+enum MovementType {
+  MOVEMENT_TYPE_UNSPECIFIED = 0;
+  INCOME = 1;
+  EXPENSE = 2;
+}
+
+message Movement {
+  string id = 1;
+  MovementType type = 2;
+  int64 amount_cents = 3;
+  string description = 4;
+  string occurred_at = 5; // RFC 3339, UTC
+}
+
+message CreateMovementRequest {
+  MovementType type = 1;
+  int64 amount_cents = 2;
+  string description = 3;
+}
+
+message CreateMovementResponse {
+  Movement movement = 1;
+}
+
+message ListMovementsRequest {}
+
+message ListMovementsResponse {
+  repeated Movement movements = 1;
+}
+
+message GetBalanceRequest {}
+
+message GetBalanceResponse {
+  int64 balance_cents = 1;
+}

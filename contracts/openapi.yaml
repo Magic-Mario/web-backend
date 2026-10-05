@@ -1,0 +1,96 @@
+openapi: "3.0.3"
+info:
+  title: Finance API (borde REST)
+  version: "1.0.0"
+  description: >
+    Contrato de borde entre el frontend Next.js y el backend FastAPI.
+    El backend es dueño del dato; el frontend no accede al almacenamiento.
+servers:
+  # Borde público: el ALB enruta /api/* al backend.
+  - url: https://{alb_host}/api
+    description: Borde público (ALB) hacia el backend.
+    variables:
+      alb_host:
+        default: ALB_DNS_NAME
+        description: DNS del Application Load Balancer
+  # Acceso directo (local y pruebas).
+  - url: http://localhost:8000
+    description: Backend directo (local y pruebas).
+paths:
+  /movements:
+    get:
+      summary: Lista los movimientos registrados
+      responses:
+        "200":
+          description: Lista de movimientos en orden de creación
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Movement"
+    post:
+      summary: Registra un ingreso o un gasto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMovement"
+      responses:
+        "201":
+          description: Movimiento creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Movement"
+        "422":
+          description: Datos inválidos (tipo o monto)
+  /balance:
+    get:
+      summary: Devuelve el saldo calculado
+      responses:
+        "200":
+          description: Saldo en centavos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balance_cents:
+                    type: integer
+                    format: int64
+components:
+  schemas:
+    MovementType:
+      type: string
+      enum: [INCOME, EXPENSE]
+    Movement:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          $ref: "#/components/schemas/MovementType"
+        amount_cents:
+          type: integer
+          format: int64
+        description:
+          type: string
+          maxLength: 200
+        occurred_at:
+          type: string
+          format: date-time
+    CreateMovement:
+      type: object
+      required: [type, amount_cents]
+      properties:
+        type:
+          $ref: "#/components/schemas/MovementType"
+        amount_cents:
+          type: integer
+          format: int64
+          minimum: 1
+        description:
+          type: string
+          maxLength: 200

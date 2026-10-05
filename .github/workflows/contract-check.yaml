@@ -1,0 +1,42 @@
+# Repo backend: compatibilidad de contratos (FR-006, FR-012, edge case del spec).
+# Un breaking change sin bump mayor del tag contracts/v* falla el pipeline.
+name: contract-check
+
+on:
+  pull_request:
+    paths:
+      - "contracts/**"
+      - "proto/**"
+      - "rest/**"
+      - "grpc_adapter/**"
+  push:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - "proto/**"
+
+jobs:
+  breaking:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Previous contracts tag
+        id: prev
+        run: |
+          PREV=$(git tag --list 'contracts/v*' --sort=-v:refname | sed -n '2p')
+          echo "tag=${PREV:-contracts/v1.0.0}" >> "$GITHUB_OUTPUT"
+      - uses: bufbuild/buf-setup-action@v1
+      - name: buf breaking (proto vs tag previo)
+        run: |
+          git show '${{ steps.prev.outputs.tag }}:proto/finance.proto' > /tmp/prev.proto
+          buf breaking --against /tmp/prev.proto --path proto/finance.proto
+        working-directory: .
+      - name: OpenAPI diff vs tag previo
+        run: |
+          git show '${{ steps.prev.outputs.tag }}:contracts/openapi.yaml' > /tmp/prev-openapi.yaml
+          docker run --rm -v "$PWD:/w" -v /tmp:/t \
+            tufin/oasdiff@sha256:5486d84e8b03a19cedccd0890a77efc8b168365533abe39654899a9c4c38a9d3 diff /t/prev-openapi.yaml /w/contracts/openapi.yaml \
+            --fail-on-breaking

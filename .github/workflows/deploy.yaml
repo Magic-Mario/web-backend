@@ -1,0 +1,46 @@
+# Repo backend: build + push + deploy solo del backend (FR-018, FR-019, SC-007).
+# Tags inmutables :git-sha y :semver; nunca latest en prod. Si el frontend deja
+# de responder tras el deploy, se revierte al tag anterior (puerta SC-007).
+name: backend-deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  SERVICE: backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-buildx-action@v3
+      - name: Build + push (:sha y :semver)
+        run: |
+          SHA_TAG="${ECR_REGISTRY}/${SERVICE}:${GITHUB_SHA}"
+          SEMVER="${GITHUB_REF_NAME#v}"
+          docker buildx build --push \
+            -t "$SHA_TAG" -t "${ECR_REGISTRY}/${SERVICE}:${SEMVER}" .
+          echo "IMAGE=$SHA_TAG" >> "$GITHUB_ENV"
+      - name: kubectl apply con el tag explícito
+        run: |
+          sed -i "s|image: BACKEND_IMAGE|image: ${IMAGE}|" k8s/deployment.yaml
+          kubectl apply -f k8s/ && kubectl rollout status deployment/backend
+        env:
+          KUBECONFIG: ${{ secrets.BACKEND_KUBECONFIG }}
+      - name: Smoke del backend
+        run: curl -sf "http://${{ vars.BACKEND_URL }}/balance"
+      - name: Health check cruzado del frontend (puerta SC-007)
+        run: curl -sf "http://${{ vars.FRONTEND_URL }}/api/balance"
+      - name: Revertir si el frontend no responde
+        if: failure()
+        run: kubectl rollout undo deployment/backend
+        env:
+          KUBECONFIG: ${{ secrets.BACKEND_KUBECONFIG }}

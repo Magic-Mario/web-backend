@@ -40,3 +40,5 @@ jobs:
           docker run --rm -v "$PWD:/w" -v /tmp:/t \
             tufin/oasdiff@sha256:5486d84e8b03a19cedccd0890a77efc8b168365533abe39654899a9c4c38a9d3 diff /t/prev-openapi.yaml /w/contracts/openapi.yaml \
             --fail-on-breaking
+
+# touch contract-check

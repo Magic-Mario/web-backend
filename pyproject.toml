@@ -1,7 +1,7 @@
 [project]
-name = "finance-backend"
+name = "life-backend"
 version = "0.1.0"
-description = "Backend del servicio de finanzas (borde REST + gRPC interno)"
+description = "Backend del juego de simulación de vida (REST de borde + cliente gRPC events.v1)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

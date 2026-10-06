@@ -1,0 +1,98 @@
+// Contrato gRPC interno del microservicio de eventos.
+// Versionado por paquete: events.v1. Cambios incompatibles crean events.v2.
+//
+// Propiedad del microservicio de eventos. El backend es el CLIENTE y el
+// microservicio el SERVIDOR (principio III: comunicación interna este-oeste
+// por gRPC sobre contrato .proto versionado).
+//
+// Gate de la constitución 1.3.0: este contrato MUST estar definido y con
+// prueba de contrato ANTES de desplegar el adaptador (ver
+// tests/test_grpc_contract.py).
+syntax = "proto3";
+
+package events.v1;
+
+option go_package = "cloud-project-backend/proto/eventsv1;eventsv1";
+
+// EventsService devuelve eventos jugables derivados de sucesos reales de la
+// época en la que se encuentra el personaje (FR-003, FR-007).
+service EventsService {
+  // Devuelve hasta `limit` eventos, filtrados por edad y sin repetir los de
+  // `exclude_ids`. Nunca devuelve menos por falta de red: si la fuente externa
+  // falla, responde con el catálogo semilla (edge cases de la spec).
+  rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  COTIDIANO = 1;
+  EDUCATIVO = 2;
+  LABORAL = 3;
+  RELACION = 4;
+  SENTIMENTAL = 5;
+}
+
+// Origen del contenido servido. Permite verificar FR-003a y SC-010.
+enum EventOrigin {
+  EVENT_ORIGIN_UNSPECIFIED = 0;
+  // Contenido persistido en la caché del microservicio (búsqueda hecha una
+  // sola vez para este año).
+  CACHED = 1;
+  // Búsqueda fresca realizada en esta misma llamada (primera del año).
+  FETCHED = 2;
+  // Catálogo semilla embebido: la fuente externa falló o no devolvió nada.
+  SEED = 3;
+}
+
+// Un cambio sobre una de las cuatro stats básicas (FR-004).
+message StatDelta {
+  // health | happiness | intelligence | looks
+  string stat = 1;
+  int32 value = 2;
+}
+
+message EventOption {
+  string id = 1;
+  string label = 2;
+  // true si elegir esta opción mata al personaje (FR-005, vía a).
+  bool fatal = 3;
+  repeated StatDelta deltas = 4;
+}
+
+message LifeEvent {
+  // Estable entre consultas: hash de year + sección + texto.
+  string id = 1;
+  EventType type = 2;
+  // Enunciado ya redactado en español (la interfaz es en español).
+  string text = 3;
+  // Rango de edad propio del evento (FR-013). El servicio filtra por él.
+  int32 min_age = 4;
+  int32 max_age = 5;
+  // Procedencia del suceso, para trazabilidad y depuración.
+  string source_url = 6;
+  repeated EventOption options = 7;
+}
+
+message GetEventsRequest {
+  // Año de vida en curso: es el parámetro con el que se localiza la época
+  // (FR-003, FR-007). Corresponde a birth_year + edad.
+  int32 year = 1;
+  // Edad actual en años cumplidos; se usa para aplicar min_age/max_age.
+  int32 age_years = 2;
+  // Datos de nacimiento que condicionan la simulación (FR-007).
+  string gender = 3;
+  string country = 4;
+  string city = 5;
+  // Máximo devuelto: 2 con granularidad mensual, 5 con anual (FR-003a).
+  // El servicio NUNCA devuelve más que esto.
+  int32 limit = 6;
+  // Ids ya consumidos por esta vida; no deben volver a aparecer (SC-005).
+  repeated string exclude_ids = 7;
+}
+
+message GetEventsResponse {
+  repeated LifeEvent events = 1;
+  EventOrigin origin = 2;
+  // Eco del año servido, para que el backend registre el historial (FR-008).
+  int32 year = 3;
+}

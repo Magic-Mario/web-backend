@@ -1,22 +1,32 @@
-"""Prueba de contrato REST contra contracts/openapi.yaml.
+"""Prueba de contrato REST contra `contracts/openapi.yaml` — PUERTA de la
+constitución para la comunicación frontend→backend.
 
-Se escribe antes de la implementación (debe fallar hasta que exista
-`rest.app`). Valida que el adaptador exponga el contrato de borde.
+Se escribe **antes** de la implementación (test-first, como pide la plantilla
+de tareas): hasta que US3 sirva las 8 rutas del contrato, los tests de
+cobertura y de round-trip **deben fallar**. `test_contract_has_no_finance_routes`
+sí pasa desde el momento en que se coloca el contrato (T009).
+
+Este fichero sustituye por completo a la prueba de finanzas de la feature 001:
+los tests viejos afirmaban justo lo contrario de lo que mide SC-009.
+
+El repo es el source of truth de sus contratos (ver README), así que se valida
+contra `contracts/openapi.yaml` propio: es hermético (funciona aunque el repo
+se clone en solitario) y no depende de la profundidad de directorios. El
+`parents[3]` anterior apuntaba al layout monorepo `apps/backend/tests/` y
+quebró con el split de repos.
 """
 
 from __future__ import annotations
 
 import pathlib
+import uuid
 
 import yaml
 from fastapi.testclient import TestClient
 
-# Este repo es el source of truth de sus contratos (ver README), así que la
-# prueba valida contra `contracts/openapi.yaml` propio y no contra el workspace
-# de specs: es hermético (funciona aunque el repo se clone en solitario) y no
-# depende de la profundidad de directorios. El `parents[3]` anterior apuntaba al
-# layout monorepo `apps/backend/tests/` y quebró con el split de repos.
 OPENAPI_PATH = pathlib.Path(__file__).resolve().parents[1] / "contracts" / "openapi.yaml"
+
+FINANCE_TOKENS = ("balance", "movement", "finance")
 
 
 def _load_spec() -> dict:
@@ -24,14 +34,39 @@ def _load_spec() -> dict:
         return yaml.safe_load(fh)
 
 
-def _client() -> TestClient:
+def _client(player_id: str | None = None) -> TestClient:
     # Import diferido: el test debe fallar si el adaptador no existe todavía.
     from rest.app import create_app
 
-    return TestClient(create_app())
+    client = TestClient(create_app())
+    client.headers["X-Player-Id"] = player_id or str(uuid.uuid4())
+    return client
+
+
+def _new_life(client: TestClient, **overrides) -> dict:
+    payload = {
+        "gender": "MALE",
+        "country": "AR",
+        "city": "Buenos Aires",
+        "birth_year": 1990,
+        "granularity": "YEAR",
+    }
+    payload.update(overrides)
+    response = client.post("/lives", json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_contract_has_no_finance_routes() -> None:
+    """SC-009: 0 endpoints de finanzas declarados en el contrato."""
+    spec = _load_spec()
+    declared = " ".join(spec["paths"].keys()).lower()
+    for token in FINANCE_TOKENS:
+        assert token not in declared, f"el contrato aún declara finanzas: {token}"
 
 
 def test_app_exposes_openapi_contract_paths() -> None:
+    """Toda ruta del contrato MUST estar servida por la app (y solo las del juego)."""
     spec = _load_spec()
     contract_paths = set(spec["paths"].keys())
 
@@ -39,61 +74,121 @@ def test_app_exposes_openapi_contract_paths() -> None:
     app_paths = set(app.openapi()["paths"].keys())
 
     assert contract_paths <= app_paths, (
-        f"faltan rutas del contrato: {contract_paths - app_paths}"
+        f"faltan rutas del contrato: {sorted(contract_paths - app_paths)}"
+    )
+
+    # Y no puede sobrar ninguna: 0 endpoints de finanzas (SC-009).
+    assert app_paths <= contract_paths, (
+        f"rutas servidas que no están en el contrato: {sorted(app_paths - contract_paths)}"
     )
 
 
-def test_create_list_and_balance_roundtrip() -> None:
-    client = _client()
+def test_player_id_header_is_required_and_validated() -> None:
+    """FR-008: identidad anónima UUID v4 en la cabecera `X-Player-Id`."""
+    from rest.app import create_app
+
+    app = TestClient(create_app())
+
+    # Sin cabecera -> 422 (es un parámetro requerido del contrato).
+    assert app.post(
+        "/lives",
+        json={"gender": "MALE", "country": "AR", "city": "Buenos Aires", "birth_year": 1990},
+    ).status_code == 422
+
+    # Con un valor que no es UUID -> 422.
+    app.headers["X-Player-Id"] = "no-es-un-uuid"
+    assert app.post(
+        "/lives",
+        json={"gender": "MALE", "country": "AR", "city": "Buenos Aires", "birth_year": 1990},
+    ).status_code == 422
+
+
+def test_create_life_returns_initial_stats_and_parents() -> None:
+    """US1 · FR-001, FR-010, FR-014: validación, stats en 50 y padres."""
     spec = _load_spec()
-    movement_schema = spec["components"]["schemas"]["Movement"]
+    life_schema = spec["components"]["schemas"]["Life"]
 
-    created = client.post(
-        "/movements",
-        json={"type": "INCOME", "amount_cents": 10000, "description": "sueldo"},
-    )
-    assert created.status_code == 201, created.text
-    body = created.json()
-    for field in movement_schema["properties"]:
-        assert field in body
-    assert body["type"] == "INCOME"
-    assert body["amount_cents"] == 10000
-
-    client.post("/movements", json={"type": "EXPENSE", "amount_cents": 2500})
-
-    listed = client.get("/movements")
-    assert listed.status_code == 200
-    assert len(listed.json()) == 2
-
-    balance = client.get("/balance")
-    assert balance.status_code == 200
-    assert balance.json() == {"balance_cents": 7500}
-
-
-def test_invalid_payloads_return_422() -> None:
     client = _client()
+    life = _new_life(client)
 
+    for field in life_schema["required"]:
+        assert field in life, f"falta el campo obligatorio {field}"
+
+    # FR-010: idénticas para todos, sea cual sea el nacimiento.
+    assert life["stats"] == {
+        "health": 50,
+        "happiness": 50,
+        "intelligence": 50,
+        "looks": 50,
+    }, life["stats"]
+
+    # FR-014: los padres existen desde la creación.
+    relations = {p["relation"] for p in life["people"]}
+    assert {"FATHER", "MOTHER"} <= relations, life["people"]
+
+    # FR-001: dato inválido impide crear la vida.
     assert client.post(
-        "/movements", json={"type": "INCOME", "amount_cents": 0}
+        "/lives",
+        json={"gender": "MALE", "country": "AR", "city": "Buenos Aires", "birth_year": 1890},
     ).status_code == 422
     assert client.post(
-        "/movements", json={"type": "UNSPECIFIED", "amount_cents": 100}
+        "/lives",
+        json={"gender": "MALE", "country": "AR", "city": "", "birth_year": 1990},
     ).status_code == 422
-    assert client.post(
-        "/movements",
-        json={"type": "INCOME", "amount_cents": 100, "description": "x" * 201},
-    ).status_code == 422
+
+
+def test_create_advance_decision_roundtrip() -> None:
+    """US2 · FR-002, FR-003, FR-004, FR-011: avance con un evento y decisión."""
+    client = _client()
+    life = _new_life(client)
+
+    advanced = client.post("/lives/advance")
+    assert advanced.status_code == 200, advanced.text
+    body = advanced.json()
+
+    # FR-002: la edad avanza y la granularidad YEAR suma 12 meses.
+    assert body["life"]["age_months"] == 12, body["life"]
+    # FR-003: exactamente un evento, con al menos dos opciones.
+    assert body["event"]["options"], body["event"]
+    assert len(body["event"]["options"]) >= 2, body["event"]
+    # FR-011: la deriva natural se informa por separado de los eventos.
+    assert isinstance(body.get("derived"), dict), body.get("derived")
+
+    decided = client.post("/lives/decision", json={"option_id": "opt-1"})
+    assert decided.status_code == 200, decided.text
+    decision = decided.json()
+    # SC-003: toda decisión cambia algo observable.
+    assert decision["deltas"], decision
+    assert "dead" in decision, decision
+
+    # Un segundo avance debe servir otro evento (SC-005, sin atascarse).
+    second = client.post("/lives/advance")
+    assert second.status_code == 200, second.text
+    assert second.json()["life"]["age_months"] == 24, second.json()["life"]
+
+
+def test_summary_gated_until_death_and_new_life_allowed() -> None:
+    """US3 · FR-005, SC-004: resumen solo al morir y partida nueva sin bloqueo."""
+    client = _client()
+    _new_life(client)
+
+    # Mientras vive, el resumen no existe (409, no un estado intermedio roto).
+    assert client.get("/lives/summary").status_code == 409
+
+    # Terminar la vida habilita el resumen y permite empezar de nuevo.
+    assert client.delete("/lives").status_code == 204
+    assert client.get("/lives").status_code == 404
+    assert client.get("/lives/summary").status_code == 404
+
+    # SC-004: nunca bloquea la interfaz — se puede crear otra vida.
+    assert _new_life(client)["stats"]["health"] == 50
 
 
 def test_api_prefix_matches_root_contract() -> None:
     """/api/* es el prefijo que publica el ALB hacia el backend."""
     client = _client()
+    _new_life(client)
 
-    created = client.post(
-        "/api/movements",
-        json={"type": "INCOME", "amount_cents": 1000, "description": "sueldo"},
-    )
-    assert created.status_code == 201, created.text
-
-    assert client.get("/api/movements").status_code == 200
-    assert client.get("/api/balance").json() == {"balance_cents": 1000}
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/lives").status_code == 200
+    assert client.post("/api/lives/advance").status_code == 200

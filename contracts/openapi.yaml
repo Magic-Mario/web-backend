@@ -1,96 +1,456 @@
-openapi: "3.0.3"
+openapi: 3.0.3
 info:
-  title: Finance API (borde REST)
-  version: "1.0.0"
+  title: Life Simulator API (borde REST)
   description: >
-    Contrato de borde entre el frontend Next.js y el backend FastAPI.
-    El backend es dueño del dato; el frontend no accede al almacenamiento.
+    Contrato de borde navegador→backend para la feature
+    002-simulacion-vida. Reemplaza por completo al contrato de finanzas de la
+    feature 001 (FR-009, SC-009: 0 endpoints de finanzas).
+    Consumido por el frontend server-side de Next.js y por la prueba de
+    contrato `tests/test_rest_contract.py`.
+  version: 1.0.0
 servers:
-  # Borde público: el ALB enruta /api/* al backend.
-  - url: https://{alb_host}/api
-    description: Borde público (ALB) hacia el backend.
-    variables:
-      alb_host:
-        default: ALB_DNS_NAME
-        description: DNS del Application Load Balancer
-  # Acceso directo (local y pruebas).
-  - url: http://localhost:8000
-    description: Backend directo (local y pruebas).
+  - url: /
+    description: raíz (uso directo y pruebas)
+  - url: /api
+    description: prefijo publicado por el ALB hacia el backend
 paths:
-  /movements:
+  /health:
     get:
-      summary: Lista los movimientos registrados
+      operationId: health
+      summary: Readiness del adaptador REST
       responses:
         "200":
-          description: Lista de movimientos en orden de creación
+          description: servicio disponible
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Movement"
+                $ref: "#/components/schemas/Health"
+
+  /lives:
+    parameters:
+      - $ref: "#/components/parameters/PlayerId"
     post:
-      summary: Registra un ingreso o un gasto
+      operationId: createLife
+      summary: Crea una vida validando los datos de nacimiento (FR-001)
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreateMovement"
+              $ref: "#/components/schemas/CreateLifeRequest"
       responses:
         "201":
-          description: Movimiento creado
+          description: vida creada; las cuatro stats empiezan en 50 (FR-010)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Movement"
+                $ref: "#/components/schemas/Life"
         "422":
-          description: Datos inválidos (tipo o monto)
-  /balance:
+          description: falta un dato obligatorio o el año está fuera de rango
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "409":
+          description: ya existe una vida para este jugador (una partida en v1, FR-008)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
     get:
-      summary: Devuelve el saldo calculado
+      operationId: getLife
+      summary: Retoma la vida en curso tras recargar o reiniciar (FR-008)
       responses:
         "200":
-          description: Saldo en centavos
+          description: vida en curso
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  balance_cents:
-                    type: integer
-                    format: int64
+                $ref: "#/components/schemas/Life"
+        "404":
+          description: no hay vida para este jugador
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      operationId: deleteLife
+      summary: Elimina la vida para empezar otra (FR-005)
+      responses:
+        "204":
+          description: vida eliminada; el jugador puede crear una nueva
+        "404":
+          description: no hay vida para este jugador
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /lives/advance:
+    parameters:
+      - $ref: "#/components/parameters/PlayerId"
+    post:
+      operationId: advanceLife
+      summary: >
+        Avanza un período, aplica la deriva natural y presenta un único
+        evento con sus opciones (FR-002, FR-003, FR-011)
+      responses:
+        "200":
+          description: período avanzado y evento presentado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdvanceResponse"
+        "404":
+          description: no hay vida en curso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: la vida ya terminó (FR-005)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /lives/decision:
+    parameters:
+      - $ref: "#/components/parameters/PlayerId"
+    post:
+      operationId: submitDecision
+      summary: >
+        Registra la opción elegida, aplica los deltas sobre las stats y
+        resuelve la muerte si procede (FR-003, FR-004, FR-005)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecisionRequest"
+      responses:
+        "200":
+          description: decisión aplicada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecisionResponse"
+        "404":
+          description: no hay vida en curso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: no hay evento pendiente de decisión
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /lives/summary:
+    parameters:
+      - $ref: "#/components/parameters/PlayerId"
+    get:
+      operationId: getSummary
+      summary: >
+        Resumen de fin de vida: edad alcanzada, causa de muerte y desglose
+        por educación, trabajo y relaciones (FR-005)
+      responses:
+        "200":
+          description: resumen disponible
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifeSummary"
+        "404":
+          description: no hay vida para este jugador
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: la vida sigue en curso; el resumen existe al morir
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /catalog/birth:
+    get:
+      operationId: getBirthCatalog
+      summary: Catálogo acotado de países y ciudades para crear el personaje (FR-001)
+      responses:
+        "200":
+          description: catálogo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BirthCatalog"
+
 components:
+  parameters:
+    PlayerId:
+      name: X-Player-Id
+      in: header
+      required: true
+      description: Identificador anónimo UUID v4 generado en el navegador (FR-008)
+      schema:
+        type: string
+        format: uuid
+
   schemas:
-    MovementType:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    Stats:
+      type: object
+      description: Cuatro stats básicas en escala 0–100 (FR-004). Solo estas cuatro en v1.
+      required: [health, happiness, intelligence, looks]
+      additionalProperties: false
+      properties:
+        health:      { type: integer, minimum: 0, maximum: 100, example: 50 }
+        happiness:   { type: integer, minimum: 0, maximum: 100, example: 50 }
+        intelligence: { type: integer, minimum: 0, maximum: 100, example: 50 }
+        looks:       { type: integer, minimum: 0, maximum: 100, example: 50 }
+
+    PersonaCercana:
+      type: object
+      required: [name, relation, state]
+      properties:
+        name:     { type: string, example: "María" }
+        relation:
+          type: string
+          enum: [FATHER, MOTHER, SIBLING, FRIEND, PARTNER]
+        state:
+          type: string
+          enum: [ALIVE, DEAD, TOGETHER, SEPARATED]
+
+    Granularity:
       type: string
-      enum: [INCOME, EXPENSE]
-    Movement:
+      enum: [YEAR, MONTH]
+      default: YEAR
+
+    LifeStatus:
+      type: string
+      enum: [ALIVE, DEAD]
+
+    CreateLifeRequest:
+      type: object
+      required: [gender, country, city, birth_year]
+      additionalProperties: false
+      properties:
+        gender:
+          type: string
+          enum: [MALE, FEMALE]
+        country:
+          type: string
+          description: código del catálogo de nacimiento
+          example: AR
+        city:
+          type: string
+          example: Buenos Aires
+        birth_year:
+          type: integer
+          minimum: 1900
+          # Sin `maximum` estático: la regla es `1900 ≤ birth_year ≤ año actual`
+          # (spec, Assumptions y data-model.md), y OpenAPI no puede expresar el
+          # año en curso. El servidor devuelve 422 fuera de ese rango y el
+          # detalle lo recoge el ejemplo de ValidationError.
+          description: año de nacimiento, entre 1900 y el año actual
+          example: 1990
+        granularity:
+          $ref: "#/components/schemas/Granularity"
+
+    Life:
+      type: object
+      required: [player_id, gender, country, city, birth_year, granularity,
+                 age_months, current_year, stats, status, people]
+      properties:
+        player_id:
+          type: string
+          format: uuid
+        gender:
+          type: string
+          enum: [MALE, FEMALE]
+        country:  { type: string, example: AR }
+        city:     { type: string, example: Buenos Aires }
+        birth_year: { type: integer, example: 1990 }
+        granularity:
+          $ref: "#/components/schemas/Granularity"
+        age_months:
+          type: integer
+          description: edad en meses; avanza 12 o 1 según la granularidad
+          example: 0
+        current_year:
+          type: integer
+          example: 1990
+        stats:
+          $ref: "#/components/schemas/Stats"
+        status:
+          $ref: "#/components/schemas/LifeStatus"
+        cause_of_death:
+          type: string
+          nullable: true
+          enum: [HEALTH_ZERO, FATAL_OPTION, FATAL_RANDOM, null]
+        people:
+          type: array
+          items:
+            $ref: "#/components/schemas/PersonaCercana"
+
+    EventOption:
+      type: object
+      required: [id, label]
+      properties:
+        id:      { type: string, example: "opt-1" }
+        label:   { type: string, example: "Ignorar la noticia" }
+        fatal:
+          type: boolean
+          default: false
+          description: si es true, elegir esta opción muere al personaje (FR-005a)
+
+    PresentedEvent:
+      type: object
+      required: [id, type, text, options]
+      properties:
+        id:    { type: string, example: "1990-acontecimientos-0042" }
+        type:
+          type: string
+          enum: [COTIDIANO, EDUCATIVO, LABORAL, RELACION, SENTIMENTAL]
+        text:
+          type: string
+          description: enunciado en español, derivado de un suceso real de la época
+          example: "Este año tu país entra en una crisis económica importante."
+        year:
+          type: integer
+          example: 1990
+        source:
+          type: string
+          enum: [WIKIPEDIA, SEED]
+          description: SEED cuando falló la búsqueda externa (edge cases)
+        options:
+          type: array
+          minItems: 2
+          items:
+            $ref: "#/components/schemas/EventOption"
+
+    AdvanceResponse:
+      type: object
+      required: [life, event]
+      properties:
+        life:
+          $ref: "#/components/schemas/Life"
+        event:
+          $ref: "#/components/schemas/PresentedEvent"
+        derived:
+          type: object
+          description: delta aplicado por la deriva natural de este período (FR-011)
+          properties:
+            health:     { type: integer, example: -1 }
+            happiness:  { type: integer, example: 3 }
+
+    DecisionRequest:
+      type: object
+      required: [option_id]
+      additionalProperties: false
+      properties:
+        option_id:
+          type: string
+          example: "opt-1"
+
+    DecisionResponse:
+      type: object
+      required: [life, deltas, dead]
+      properties:
+        life:
+          $ref: "#/components/schemas/Life"
+        deltas:
+          type: object
+          description: cambio aplicado sobre las stats (SC-003)
+          additionalProperties:
+            type: integer
+          example: { health: -5, happiness: 8 }
+        dead:
+          type: boolean
+        cause_of_death:
+          type: string
+          nullable: true
+          enum: [HEALTH_ZERO, FATAL_OPTION, FATAL_RANDOM, null]
+
+    LifeSummary:
+      type: object
+      required: [age_reached, cause_of_death, by_system]
+      properties:
+        age_reached:
+          type: integer
+          description: edad alcanzada, en años cumplidos
+          example: 47
+        cause_of_death:
+          type: string
+          enum: [HEALTH_ZERO, FATAL_OPTION, FATAL_RANDOM]
+        by_system:
+          type: object
+          description: desglose por sistema de FR-006 (FR-005)
+          required: [education, work, relationships]
+          properties:
+            education:
+              $ref: "#/components/schemas/SystemDigest"
+            work:
+              $ref: "#/components/schemas/SystemDigest"
+            relationships:
+              $ref: "#/components/schemas/SystemDigest"
+
+    SystemDigest:
       type: object
       properties:
-        id:
-          type: string
-        type:
-          $ref: "#/components/schemas/MovementType"
-        amount_cents:
+        events:
           type: integer
-          format: int64
-        description:
-          type: string
-          maxLength: 200
-        occurred_at:
-          type: string
-          format: date-time
-    CreateMovement:
+          example: 12
+        decisions:
+          type: integer
+          example: 12
+        highlights:
+          type: array
+          items:
+            type: string
+          maxItems: 5
+          example: ["Terminaste la universidad", "Conociste a tu pareja"]
+
+    BirthCatalog:
       type: object
-      required: [type, amount_cents]
+      required: [countries]
       properties:
-        type:
-          $ref: "#/components/schemas/MovementType"
-        amount_cents:
-          type: integer
-          format: int64
-          minimum: 1
-        description:
+        countries:
+          type: array
+          items:
+            type: object
+            required: [code, name, cities]
+            properties:
+              code:  { type: string, example: AR }
+              name:  { type: string, example: Argentina }
+              cities:
+                type: array
+                items:
+                  type: string
+                example: [Buenos Aires, Córdoba, Rosario]
+
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
           type: string
-          maxLength: 200
+          example: "no hay vida en curso para este jugador"
+
+    ValidationError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          example: "birth_year debe estar entre 1900 y el año actual"

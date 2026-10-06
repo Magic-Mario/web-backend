@@ -6,6 +6,9 @@ venv/
 *.egg-info/
 .pytest_cache/
 grpc_adapter/_generated/
+# Stubs del cliente gRPC events.v1: se generan con
+# `bash tools/gen_proto.sh proto/events.proto` (y en el build de la imagen).
+grpc_client/_generated/
 
 # Build
 dist/

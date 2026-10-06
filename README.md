@@ -24,7 +24,28 @@ los contratos** (`contracts/openapi.yaml`, `proto/finance.proto`, tags
 ## Uso local
 
 ```bash
-uv sync && uv run pytest
+uv sync && uv run pytest                 # tests (14)
+uv run uvicorn rest.app:app --port 8000  # API en http://localhost:8000
+```
+
+Endpoints (los mismos en la raíz y bajo `/api`, prefijo que publica el ALB):
+
+| Método | Ruta | Qué hace |
+|---|---|---|
+| `GET` | `/balance` | saldo en céntimos (`balance_cents`) |
+| `GET` | `/movements` | lista de movimientos |
+| `POST` | `/movements` | crea uno — `{type, amount_cents>0, description}` → `201`, inválido → `422` |
+
+```bash
+curl -s localhost:8000/balance
+curl -s -X POST localhost:8000/movements -H 'Content-Type: application/json' \
+  -d '{"type":"INCOME","amount_cents":200000,"description":"Nómina"}'
+curl -s localhost:8000/movements
+```
+
+Swagger UI interactivo: <http://localhost:8000/docs>
+
+```bash
 docker build -t backend:local .
 ```
 

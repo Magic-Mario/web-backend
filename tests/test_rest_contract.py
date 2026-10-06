@@ -11,10 +11,12 @@ import pathlib
 import yaml
 from fastapi.testclient import TestClient
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-OPENAPI_PATH = (
-    REPO_ROOT / "specs" / "001-dual-eks-grpc-infra" / "contracts" / "openapi.yaml"
-)
+# Este repo es el source of truth de sus contratos (ver README), así que la
+# prueba valida contra `contracts/openapi.yaml` propio y no contra el workspace
+# de specs: es hermético (funciona aunque el repo se clone en solitario) y no
+# depende de la profundidad de directorios. El `parents[3]` anterior apuntaba al
+# layout monorepo `apps/backend/tests/` y quebró con el split de repos.
+OPENAPI_PATH = pathlib.Path(__file__).resolve().parents[1] / "contracts" / "openapi.yaml"
 
 
 def _load_spec() -> dict:

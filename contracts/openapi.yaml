@@ -302,6 +302,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PersonaCercana"
+        pending_event:
+          nullable: true
+          default: null
+          description: >
+            Suceso presentado en el período en curso y todavía sin decidir,
+            o `null` si no lo hay. Sólo lo devuelve `GET /lives`, para que
+            recargar la página retome la partida sin perder ese progreso
+            (SC-006); `POST /lives/advance` lo trae en su campo `event`.
+          allOf:
+            - $ref: "#/components/schemas/PresentedEvent"
 
     EventOption:
       type: object

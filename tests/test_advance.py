@@ -251,3 +251,47 @@ def test_the_advance_survives_the_events_service_being_down(
     # La deriva natural se aplica aunque no haya suceso de época (FR-011).
     assert set(outcome.derived) == {"health", "happiness"}
     assert unreachable.get_life(player_id).age_months == 12
+
+
+# --- SC-006: recargar sin perder el progreso -------------------------------
+
+
+def test_reloading_with_an_undecided_event_resumes_it(
+    service: GameService, born: Callable[..., str]
+) -> None:
+    """`GET /lives` devuelve `pending_event`; sin él, recargar deja bloqueado.
+
+    Se prueba en el adaptador REST porque ahí es donde se expone el campo
+    (el dominio ya lo guarda): si `GET /lives` no lo devolviera, el jugador
+    que recargara a mitad de decisión no podría ni decidir ni avanzar —
+    `POST /lives/advance` responde `409` mientras haya algo pendiente.
+    """
+    from fastapi.testclient import TestClient
+
+    from rest.app import create_app
+
+    player_id = born()
+    client = TestClient(create_app())
+    client.headers["X-Player-Id"] = player_id
+
+    try:
+        advanced = client.post("/lives/advance")
+        assert advanced.status_code == 200, advanced.text
+        event_id = advanced.json()["event"]["id"]
+
+        # El jugador recarga la página a mitad del período.
+        resumed = client.get("/lives")
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()["pending_event"]["id"] == event_id
+
+        # Y mientras no decida, no se le deja avanzar de largo el suceso.
+        assert client.post("/lives/advance").status_code == 409
+
+        decided = client.post("/lives/decision", json={"option_id": "opt-1"})
+        assert decided.status_code == 200, decided.text
+
+        # Resuelto: nada pendiente y el siguiente avance vuelve a ir a 200.
+        assert client.get("/lives").json()["pending_event"] is None
+        assert client.post("/lives/advance").status_code == 200
+    finally:
+        service.repo.delete_state(player_id)

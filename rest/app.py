@@ -94,37 +94,6 @@ class PersonaCercanaModel(BaseModel):
     state: PersonState
 
 
-class LifeModel(BaseModel):
-    """Vista pública de `Life`: sin cola de reserva ni contadores internos."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    player_id: str
-    gender: Gender
-    country: str
-    city: str
-    birth_year: int
-    granularity: Granularity
-    age_months: int
-    current_year: int
-    stats: StatsModel
-    status: LifeStatus
-    cause_of_death: CauseOfDeath | None = None
-    people: list[PersonaCercanaModel]
-
-
-class BirthCountryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    code: str
-    name: str
-    cities: list[str]
-
-
-class BirthCatalogModel(BaseModel):
-    countries: list[BirthCountryModel]
-
-
 class EventOptionModel(BaseModel):
     """`EventOption` público. **Sin `deltas`**: no se filtra la respuesta.
 
@@ -150,6 +119,40 @@ class PresentedEventModel(BaseModel):
     year: int | None = None
     source: EventSource
     options: list[EventOptionModel]
+
+
+class LifeModel(BaseModel):
+    """Vista pública de `Life`: sin cola de reserva ni contadores internos."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    player_id: str
+    gender: Gender
+    country: str
+    city: str
+    birth_year: int
+    granularity: Granularity
+    age_months: int
+    current_year: int
+    stats: StatsModel
+    status: LifeStatus
+    cause_of_death: CauseOfDeath | None = None
+    people: list[PersonaCercanaModel]
+    #: Sólo `GET /lives` lo rellena: es lo que permite recargar la página
+    #: y seguir con el suceso pendiente sin perderlo (SC-006).
+    pending_event: PresentedEventModel | None = None
+
+
+class BirthCountryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    name: str
+    cities: list[str]
+
+
+class BirthCatalogModel(BaseModel):
+    countries: list[BirthCountryModel]
 
 
 class DerivedModel(BaseModel):
@@ -186,7 +189,14 @@ class DecisionResponse(BaseModel):
     cause_of_death: CauseOfDeath | None = None
 
 
-def _life_model(life: Life) -> LifeModel:
+def _life_model(life: Life, *, with_pending: bool = False) -> LifeModel:
+    """Serializa la vida para el navegador.
+
+    `pending_event` sólo lo pide `GET /lives`: es lo que hace que recargar
+    la página retome el suceso pendiente en vez de perderlo (SC-006). En
+    `AdvanceResponse` el suceso ya viene en su campo `event`, así que ahí se
+    devuelve `null` y las tres respuestas siguen siendo iguales entre sí.
+    """
     return LifeModel(
         player_id=life.player_id,
         gender=life.gender,
@@ -203,6 +213,11 @@ def _life_model(life: Life) -> LifeModel:
             PersonaCercanaModel(name=p.name, relation=p.relation, state=p.state)
             for p in life.people
         ],
+        pending_event=(
+            _event_model(life.pending_event)
+            if with_pending and life.pending_event is not None
+            else None
+        ),
     )
 
 
@@ -329,7 +344,9 @@ def _build_app(repo: LivesRepo) -> FastAPI:
         summary="Retoma la vida en curso tras recargar o reiniciar (FR-008)",
     )
     def get_life(player_id: str = Depends(require_player_id)) -> LifeModel:
-        return _life_model(service.get_life(player_id))
+        # `with_pending`: si el jugador recargó con un suceso a medio decidir,
+        # se lo devuelve en vez de dejarle bloqueado (SC-006).
+        return _life_model(service.get_life(player_id), with_pending=True)
 
     @app.get(
         "/catalog/birth",

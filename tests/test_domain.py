@@ -6,10 +6,14 @@ ahora es la vida, las cuatro stats y sus transiciones.
 Cubre:
 - las reglas puras de los modelos (T014) → **verdes desde esta tarea**;
 - la **creación** de la vida (T021) → escritas *antes* de `GameService`
-  (test-first, igual que `test_rest_contract.py`), así que quedan en rojo
-  hasta T024.
+  (test-first, igual que `test_rest_contract.py`), así que quedaron en rojo
+  hasta T024;
+- la **progresión** de la vida (T056 · US2) → deriva natural por período,
+  cola de reserva, límite 2/5 y granularidad fija durante toda la vida.
 
-Las pruebas de avance/decisión/resumen llegan con US2 y US3.
+El avance con el microservicio de verdad vive en `tests/test_advance.py`
+(T039); aquí se prueba el dominio, incluida la deriva como función pura.
+Las pruebas de muerte y resumen llegan con US3 (T066).
 """
 
 from __future__ import annotations
@@ -213,3 +217,153 @@ def test_create_life_rejects_birth_year_out_of_range(birth_year: int) -> None:
             birth_year=birth_year,
         )
     assert exc.value.code == "INVALID_ARGUMENT"
+
+
+# --- Progresión de la vida (T056 · US2) ------------------------------------
+
+
+def _event(event_id: str) -> PresentedEvent:
+    return PresentedEvent(
+        id=event_id,
+        type=EventType.COTIDIANO,
+        text=f"Suceso {event_id} de la época",
+        options=[EventOption("opt-1", "Actuar", {"health": 5})],
+        year=1995,
+        source=EventSource.WIKIPEDIA,
+    )
+
+
+def test_natural_drift_decays_health_only_when_a_year_completes() -> None:
+    """FR-011: la salud baja con la edad; la felicidad fluctúa siempre."""
+    from domain.service import natural_drift
+
+    plain_month = natural_drift(
+        _life(age_months=60, granularity=Granularity.MONTH), 1
+    )
+    assert plain_month["health"] == 0
+    assert -3 <= plain_month["happiness"] <= 3
+
+    birthday = natural_drift(
+        _life(age_months=71, granularity=Granularity.MONTH), 1
+    )
+    assert birthday["health"] == -1
+    assert -3 <= birthday["happiness"] <= 3
+
+
+def test_the_health_decay_grows_with_the_age() -> None:
+    """Es la deriva la que permite terminar una vida sin edad máxima."""
+    from domain.service import natural_drift
+
+    at_birth = natural_drift(_life(age_months=0), 12)
+    at_twenty = natural_drift(_life(age_months=240), 12)
+
+    assert at_birth["health"] == -1
+    assert at_twenty["health"] == -2
+    assert at_twenty["health"] < at_birth["health"]
+
+
+def test_the_annual_health_loss_is_the_same_in_both_granularities() -> None:
+    """El riesgo anualizado no depende de la granularidad (FR-011, FR-005)."""
+    from domain.service import natural_drift
+
+    yearly = natural_drift(_life(age_months=60, granularity=Granularity.YEAR), 12)
+    monthly = sum(
+        natural_drift(_life(age_months=60 + step), 1)["health"]
+        for step in range(12)
+    )
+
+    assert yearly["health"] == monthly == -1
+
+
+def test_the_event_limit_is_set_by_the_granularity() -> None:
+    """FR-003a: 2 sucesos con granularidad mensual y 5 con anual."""
+    from domain.service import EVENTS_PER_PERIOD
+
+    assert EVENTS_PER_PERIOD[Granularity.MONTH] == 2
+    assert EVENTS_PER_PERIOD[Granularity.YEAR] == 5
+
+
+def test_reserve_pending_and_consumed_survive_a_reload() -> None:
+    """data-model §1: la cola y el evento pendiente viajan en el estado."""
+    life = _life(
+        age_months=36,
+        reserve=[_event("ev-2"), _event("ev-1")],
+        pending_event=_event("ev-0"),
+        consumed_ids=["ev-0"],
+    )
+
+    restored = Life.from_dict(life.to_dict())
+
+    assert [event.id for event in restored.reserve] == ["ev-2", "ev-1"]
+    assert restored.pending_event is not None
+    assert restored.pending_event.id == "ev-0"
+    assert restored.consumed_ids == ["ev-0"]
+    # Los `deltas` se quedan en el servidor, pero no se pierden (data-model §2).
+    assert restored.reserve[0].option("opt-1").deltas == {"health": 5}
+
+
+def test_granularity_stays_fixed_for_the_whole_life() -> None:
+    """FR-002: la granularidad no cambia ni al avanzar ni al recargar."""
+    from domain.service import GameService
+
+    service = GameService()
+    player_id = str(uuid.uuid4())
+    service.create_life(
+        player_id=player_id,
+        gender=Gender.MALE,
+        country="AR",
+        city="Buenos Aires",
+        birth_year=1990,
+        granularity=Granularity.MONTH,
+    )
+    try:
+        for _ in range(3):
+            service.advance_life(player_id=player_id)
+            service.submit_decision(player_id=player_id, option_id="opt-2")
+
+        life = service.get_life(player_id)
+        assert life.granularity is Granularity.MONTH
+        assert life.age_months == 3, "un salto de 12 meses rompería FR-002"
+        assert life.period_index == 3
+    finally:
+        service.repo.delete_state(player_id)
+
+
+def test_the_monthly_reserve_is_used_up_before_asking_again(
+    events_service: object,
+) -> None:
+    """Decisión 5 con `limit = 2`: la tercera consulta sí toca la red."""
+    from domain.service import GameService
+
+    service = GameService()
+    player_id = str(uuid.uuid4())
+    service.create_life(
+        player_id=player_id,
+        gender=Gender.MALE,
+        country="AR",
+        city="Buenos Aires",
+        birth_year=1990,
+        granularity=Granularity.MONTH,
+    )
+    try:
+        first = service.advance_life(player_id=player_id)
+        assert len(first.life.reserve) == 1  # 1 presentado + 1 en reserva
+        service.submit_decision(player_id=player_id, option_id="opt-2")
+        assert len(events_service.requests) == 1
+
+        second = service.advance_life(player_id=player_id)
+        assert len(second.life.reserve) == 0  # se gastó sin volver a consultar
+        service.submit_decision(player_id=player_id, option_id="opt-2")
+        assert len(events_service.requests) == 1
+
+        third = service.advance_life(player_id=player_id)
+        assert len(third.life.reserve) == 1  # y ahora sí hubo que reponer
+        assert len(events_service.requests) == 2
+        assert events_service.requests[1].limit == 2
+        # SC-005: nada de lo ya servido vuelve a pedirse.
+        assert set(events_service.requests[1].exclude_ids) >= {
+            first.event.id,
+            second.event.id,
+        }
+    finally:
+        service.repo.delete_state(player_id)

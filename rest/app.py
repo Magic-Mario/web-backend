@@ -31,11 +31,14 @@ from domain.catalog import birth_catalog
 from domain.models import (
     CauseOfDeath,
     DomainError,
+    EventSource,
+    EventType,
     Gender,
     Granularity,
     Life,
     LifeStatus,
     PersonState,
+    PresentedEvent,
     Relation,
 )
 from domain.service import GameService
@@ -122,6 +125,67 @@ class BirthCatalogModel(BaseModel):
     countries: list[BirthCountryModel]
 
 
+class EventOptionModel(BaseModel):
+    """`EventOption` público. **Sin `deltas`**: no se filtra la respuesta.
+
+    El `fatal` sí viaja (el contrato lo declara y la interfaz lo pone de
+    manifiesto), pero no qué cambia cada opción (data-model §2).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    label: str
+    fatal: bool = False
+
+
+class PresentedEventModel(BaseModel):
+    """Vista de navegador de `PresentedEvent`: sólo lo que se muestra."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: EventType
+    text: str
+    year: int | None = None
+    source: EventSource
+    options: list[EventOptionModel]
+
+
+class DerivedModel(BaseModel):
+    """`AdvanceResponse.derived`: la deriva natural de este período (FR-011)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    health: int
+    happiness: int
+
+
+class AdvanceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    life: LifeModel
+    event: PresentedEventModel
+    derived: DerivedModel
+
+
+class DecisionRequest(BaseModel):
+    """`DecisionRequest`: `additionalProperties: false` en el contrato."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    option_id: str
+
+
+class DecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    life: LifeModel
+    deltas: dict[str, int]
+    dead: bool
+    cause_of_death: CauseOfDeath | None = None
+
+
 def _life_model(life: Life) -> LifeModel:
     return LifeModel(
         player_id=life.player_id,
@@ -138,6 +202,22 @@ def _life_model(life: Life) -> LifeModel:
         people=[
             PersonaCercanaModel(name=p.name, relation=p.relation, state=p.state)
             for p in life.people
+        ],
+    )
+
+
+def _event_model(event: PresentedEvent) -> PresentedEventModel:
+    return PresentedEventModel(
+        id=event.id,
+        type=event.type,
+        text=event.text,
+        year=event.year,
+        source=event.source,
+        options=[
+            EventOptionModel(
+                id=option.id, label=option.label, fatal=option.fatal
+            )
+            for option in event.options
         ],
     )
 
@@ -259,6 +339,46 @@ def _build_app(repo: LivesRepo) -> FastAPI:
     )
     def get_birth_catalog() -> BirthCatalogModel:
         return BirthCatalogModel.model_validate(birth_catalog())
+
+    @app.post(
+        "/lives/advance",
+        response_model=AdvanceResponse,
+        operation_id="advanceLife",
+        summary=(
+            "Avanza un período, aplica la deriva natural y presenta un único "
+            "evento con sus opciones (FR-002, FR-003, FR-011)"
+        ),
+    )
+    def advance_life(player_id: str = Depends(require_player_id)) -> AdvanceResponse:
+        outcome = service.advance_life(player_id=player_id)
+        return AdvanceResponse(
+            life=_life_model(outcome.life),
+            event=_event_model(outcome.event),
+            derived=DerivedModel(**outcome.derived),
+        )
+
+    @app.post(
+        "/lives/decision",
+        response_model=DecisionResponse,
+        operation_id="submitDecision",
+        summary=(
+            "Registra la opción elegida, aplica los deltas sobre las stats y "
+            "resuelve la muerte si procede (FR-003, FR-004, FR-005)"
+        ),
+    )
+    def submit_decision(
+        payload: DecisionRequest,
+        player_id: str = Depends(require_player_id),
+    ) -> DecisionResponse:
+        outcome = service.submit_decision(
+            player_id=player_id, option_id=payload.option_id
+        )
+        return DecisionResponse(
+            life=_life_model(outcome.life),
+            deltas=outcome.deltas,
+            dead=outcome.dead,
+            cause_of_death=outcome.cause_of_death,
+        )
 
     return app
 

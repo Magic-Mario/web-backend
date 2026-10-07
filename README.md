@@ -1,15 +1,22 @@
 # cloud-project-backend
 
-Servicio de finanzas (Python 3.12 + FastAPI + `uv`): expone REST de borde y
-declara el servidor gRPC interno (no desplegado en v1). **Source of truth de
-los contratos** (`contracts/openapi.yaml`, `proto/finance.proto`, tags
-`contracts/vX.Y.Z`).
+Backend del **juego de simulación de vida** (Python 3.12 + FastAPI + `uv`):
+expone el REST de borde del navegador y es el **cliente** gRPC del
+microservicio de eventos. **Source of truth de los contratos**
+(`contracts/openapi.yaml`, `proto/events.proto`, tags `contracts/vX.Y.Z`).
+
+Ya no hay rastro de finanzas: la feature 002 reescribió el dominio, el
+contrato y las pruebas (FR-009, SC-009).
 
 ## Layout
 
-- `domain/` — lógica de finanzas (inmutable, en memoria en v1)
+- `domain/` — lógica del juego: `models.py` (vida, stats, personas, eventos)
+  y `birth_catalog.json` (catálogo acotado de nacimiento, no es una tabla)
+- `persistence/` — `lives_repo.py`, repositorio de la vida en DynamoDB
+  (`${PROJECT}-lives`, dueño único: este backend)
 - `rest/` — adaptador FastAPI desplegado (`rest/app.py`)
-- `grpc_adapter/` — adaptador `grpc.aio` declarado, NO desplegado (FR-012)
+- `grpc_client/` — cliente `events.v1` (`events.py`); los stubs
+  `_generated/` **no** están en git (ver `tools/gen_proto.sh`)
 - `contracts/`, `proto/` — contratos canónicos versionados
 - `tests/` — dominio + contrato REST + contrato gRPC (`uv run pytest`)
 - `tools/gen_proto.sh` — regenera stubs gRPC
@@ -19,28 +26,29 @@ los contratos** (`contracts/openapi.yaml`, `proto/finance.proto`, tags
   tag previo (breaking sin bump mayor = fallo)
 - `.github/workflows/deploy.yaml` — buildx → push ECR (`:sha`, `:semver`) →
   `kubectl apply` → smoke + health check cruzado del frontend con reversión
-  (puerta SC-007)
 
 ## Uso local
 
 ```bash
-uv sync && uv run pytest                 # tests (14)
-uv run uvicorn rest.app:app --port 8000  # API en http://localhost:8000
+# Floci debe estar levantado: la vida se persiste en DynamoDB (FR-008)
+cd ../cloud-project-infra && docker compose up -d
+
+uv sync && bash tools/gen_proto.sh proto/events.proto
+uv run pytest                                         # tests
+uv run uvicorn rest.app:app --port 8000               # API en http://localhost:8000
 ```
 
-Endpoints (los mismos en la raíz y bajo `/api`, prefijo que publica el ALB):
+Todas las rutas se sirven en la **raíz** y bajo **`/api`** (prefijo que
+publica el ALB). El contrato completo vive en
+[`contracts/openapi.yaml`](contracts/openapi.yaml); ahora mismo está en verde
+la ruta de readiness:
 
 | Método | Ruta | Qué hace |
 |---|---|---|
-| `GET` | `/balance` | saldo en céntimos (`balance_cents`) |
-| `GET` | `/movements` | lista de movimientos |
-| `POST` | `/movements` | crea uno — `{type, amount_cents>0, description}` → `201`, inválido → `422` |
+| `GET` | `/health` | `{"status": "ok"}` — readiness del adaptador |
 
 ```bash
-curl -s localhost:8000/balance
-curl -s -X POST localhost:8000/movements -H 'Content-Type: application/json' \
-  -d '{"type":"INCOME","amount_cents":200000,"description":"Nómina"}'
-curl -s localhost:8000/movements
+curl -s localhost:8000/health
 ```
 
 Swagger UI interactivo: <http://localhost:8000/docs>

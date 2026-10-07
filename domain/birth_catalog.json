@@ -1,0 +1,99 @@
+{
+  "countries": [
+    {
+      "code": "AR",
+      "name": "Argentina",
+      "cities": ["Buenos Aires", "Córdoba", "Rosario", "Mendoza", "La Plata"]
+    },
+    {
+      "code": "BO",
+      "name": "Bolivia",
+      "cities": ["La Paz", "Santa Cruz de la Sierra", "Cochabamba", "Sucre"]
+    },
+    {
+      "code": "BR",
+      "name": "Brasil",
+      "cities": ["São Paulo", "Río de Janeiro", "Brasilia", "Salvador", "Curitiba"]
+    },
+    {
+      "code": "CL",
+      "name": "Chile",
+      "cities": ["Santiago", "Valparaíso", "Concepción", "Antofagasta"]
+    },
+    {
+      "code": "CO",
+      "name": "Colombia",
+      "cities": ["Bogotá", "Medellín", "Cali", "Barranquilla", "Cartagena"]
+    },
+    {
+      "code": "CR",
+      "name": "Costa Rica",
+      "cities": ["San José", "Alajuela", "Heredia", "Liberia"]
+    },
+    {
+      "code": "DO",
+      "name": "República Dominicana",
+      "cities": ["Santo Domingo", "Santiago de los Caballeros", "Punta Cana"]
+    },
+    {
+      "code": "EC",
+      "name": "Ecuador",
+      "cities": ["Quito", "Guayaquil", "Cuenca", "Loja"]
+    },
+    {
+      "code": "ES",
+      "name": "España",
+      "cities": ["Madrid", "Barcelona", "Sevilla", "Valencia", "Bilbao", "Granada"]
+    },
+    {
+      "code": "FR",
+      "name": "Francia",
+      "cities": ["París", "Marsella", "Lyon", "Toulouse", "Burdeos"]
+    },
+    {
+      "code": "GT",
+      "name": "Guatemala",
+      "cities": ["Ciudad de Guatemala", "Antigua Guatemala", "Quetzaltenango"]
+    },
+    {
+      "code": "IT",
+      "name": "Italia",
+      "cities": ["Roma", "Milán", "Nápoles", "Florencia", "Turín"]
+    },
+    {
+      "code": "MX",
+      "name": "México",
+      "cities": ["Ciudad de México", "Guadalajara", "Monterrey", "Puebla", "Mérida"]
+    },
+    {
+      "code": "PE",
+      "name": "Perú",
+      "cities": ["Lima", "Arequipa", "Cusco", "Trujillo"]
+    },
+    {
+      "code": "PT",
+      "name": "Portugal",
+      "cities": ["Lisboa", "Oporto", "Braga", "Faro"]
+    },
+    {
+      "code": "PY",
+      "name": "Paraguay",
+      "cities": ["Asunción", "Ciudad del Este", "San Lorenzo"]
+    },
+    {
+      "code": "UY",
+      "name": "Uruguay",
+      "cities": ["Montevideo", "Punta del Este", "Salto", "Mercedes"]
+    },
+    {
+      "code": "US",
+      "name": "Estados Unidos",
+      "cities": ["Nueva York", "Los Ángeles", "Chicago", "Houston", "Miami"]
+    },
+    {
+      "code": "VE",
+      "name": "Venezuela",
+      "cities": ["Caracas", "Maracaibo", "Valencia", "Barquisimeto"]
+    }
+  ]
+}

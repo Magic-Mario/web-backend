@@ -1,1 +1,1 @@
-"""Dominio de finanzas (independiente de framework)."""
+"""Dominio del juego de simulación de vida (independiente de framework)."""

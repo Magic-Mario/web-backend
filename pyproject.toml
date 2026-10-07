@@ -5,6 +5,7 @@ description = "Backend del juego de simulación de vida (REST de borde + cliente
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "boto3>=1.40.0",
     "fastapi>=0.142.2",
     "grpcio>=1.84.0",
     "grpcio-tools>=1.84.0",

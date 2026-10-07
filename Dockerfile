@@ -10,11 +10,20 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Código del backend (incluye grpc_adapter/_generated, declarado pero no servido)
+# Código del backend (incluye los contratos y el generador de stubs)
 COPY config.py ./
+COPY contracts ./contracts
+COPY proto ./proto
+COPY tools ./tools
 COPY domain ./domain
+COPY persistence ./persistence
 COPY rest ./rest
-COPY grpc_adapter ./grpc_adapter
+COPY grpc_client ./grpc_client
+
+# ⚠️ Los stubs gRPC NO están en git (`.gitignore`) y `grpc_client/events.py`
+# los importa en runtime: MUST generarse aquí. Sin este paso la imagen arranca
+# y revienta al importar `rest.app` (T084).
+RUN bash tools/gen_proto.sh proto/events.proto
 
 EXPOSE 8000
 

@@ -8,7 +8,7 @@ Fuentes: `specs/002-simulacion-vida/spec.md` (FR-001…FR-014) y
 `specs/002-simulacion-vida/data-model.md` (§1 `Life`, §2 `LifeEvent`).
 
 Las cuatro stats son las **únicas** de v1 (FR-004): sin dinero, habilidades
-ni energía. `Movement` y todo el dominio de finanzas desaparecen con FR-009.
+ni energía.
 """
 
 from __future__ import annotations

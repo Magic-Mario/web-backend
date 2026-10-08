@@ -39,7 +39,7 @@ jobs:
           KUBECONFIG: ${{ secrets.BACKEND_KUBECONFIG }}
       - name: Smoke del backend
         id: smoke
-        run: curl -sf "http://${{ vars.BACKEND_URL }}/balance"
+        run: curl -sf "http://${{ vars.BACKEND_URL }}/health"
       - name: Revertir si el propio backend no responde
         if: failure() && steps.smoke.outcome == 'failure'
         run: kubectl rollout undo deployment/backend
@@ -49,7 +49,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          if curl -sf --max-time 10 "http://${{ vars.FRONTEND_URL }}/api/balance"; then
+          if curl -sf --max-time 10 "http://${{ vars.FRONTEND_URL }}/"; then
             echo "frontend OK"
           else
             echo "frontend NO RESPONDE — no bloquea este deploy"

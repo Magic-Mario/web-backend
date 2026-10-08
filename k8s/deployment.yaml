@@ -14,6 +14,7 @@ spec:
       labels:
         app: backend
     spec:
+      serviceAccountName: backend
       containers:
         - name: backend
           image: BACKEND_IMAGE
@@ -22,7 +23,7 @@ spec:
             - containerPort: 8000
           readinessProbe:
             httpGet:
-              path: /balance
+              path: /health
               port: 8000
             initialDelaySeconds: 3
             periodSeconds: 5

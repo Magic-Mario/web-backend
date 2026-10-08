@@ -210,9 +210,10 @@ class PersonaCercana:
 class EventOption:
     """Opción de decisión de un evento.
 
-    `deltas` y `fatal` **no** viajan al navegador (el contrato `EventOption`
-    solo pide `id`, `label` y `fatal`): se quedan en el servidor dentro del
-    evento pendiente hasta que el jugador decide.
+    `deltas` **no** viajan al navegador: se quedan en el servidor dentro del
+    evento pendiente hasta que el jugador decide. `fatal` sí viaja, porque el
+    contrato lo declara y FR-005a exige que la interfaz lo ponga de
+    manifiesto.
     """
 
     id: str

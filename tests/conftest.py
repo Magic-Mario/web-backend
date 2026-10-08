@@ -23,8 +23,9 @@ from __future__ import annotations
 import os
 import random
 import socket
+import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Iterator
+from typing import Callable, Iterator
 
 # 1) Dirección del microservicio ANTES de cualquier import del proyecto.
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _probe:
@@ -38,6 +39,8 @@ import pytest
 from grpc_client._generated import events_pb2, events_pb2_grpc
 
 from domain import service as _domain_service
+from domain.service import GameService
+from persistence.lives_repo import LivesRepo
 
 #: (tipo, edad mínima, edad máxima) de la referencia: cubre los 5 tipos de
 #: FR-003 y deja descartados por edad los que no tocan (FR-013).
@@ -143,6 +146,15 @@ class _NeverFatalRng:
         return getattr(random, name)
 
 
+#: Nacimiento válido para la suite (FR-001): el catálogo acepta AR/Buenos Aires.
+BIRTH: dict[str, object] = {
+    "gender": "MALE",
+    "country": "AR",
+    "city": "Buenos Aires",
+    "birth_year": 1990,
+}
+
+
 _REFERENCE = ReferenceEventsServicer()
 _SERVER = grpc.server(ThreadPoolExecutor(max_workers=4))
 events_pb2_grpc.add_EventsServiceServicer_to_server(_REFERENCE, _SERVER)
@@ -163,3 +175,25 @@ def events_service() -> Iterator[ReferenceEventsServicer]:
     _REFERENCE.requests.clear()
     yield _REFERENCE
     _REFERENCE.requests.clear()
+
+
+@pytest.fixture
+def service() -> GameService:
+    """Servicio real sobre `${PROJECT}-lives`: las pruebas persisten de verdad."""
+    return GameService(LivesRepo())
+
+
+@pytest.fixture
+def born(service: GameService) -> Iterator[Callable[..., str]]:
+    """Fábrica de vidas que garantiza la limpieza de lo que cree cada test."""
+    created: list[str] = []
+
+    def _born(granularity: str = "YEAR") -> str:
+        player_id = str(uuid.uuid4())
+        service.create_life(player_id=player_id, granularity=granularity, **BIRTH)
+        created.append(player_id)
+        return player_id
+
+    yield _born
+    for player_id in created:
+        service.repo.delete_state(player_id)

@@ -41,7 +41,7 @@ from domain.models import (
     PresentedEvent,
     Relation,
 )
-from domain.service import GameService
+from domain.service import GameService, LifeSummary
 from persistence.lives_repo import LivesRepo
 
 #: `DomainError.code` → estado HTTP del contrato (`Error` / `ValidationError`).
@@ -189,6 +189,34 @@ class DecisionResponse(BaseModel):
     cause_of_death: CauseOfDeath | None = None
 
 
+class SystemDigestModel(BaseModel):
+    """`SystemDigest` de `LifeSummary.by_system` (FR-005)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    events: int
+    decisions: int
+    highlights: list[str]
+
+
+class BySystemModel(BaseModel):
+    """Los tres sistemas que exige el contrato: ni uno más ni uno menos."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    education: SystemDigestModel
+    work: SystemDigestModel
+    relationships: SystemDigestModel
+
+
+class LifeSummaryModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    age_reached: int
+    cause_of_death: CauseOfDeath
+    by_system: BySystemModel
+
+
 def _life_model(life: Life, *, with_pending: bool = False) -> LifeModel:
     """Serializa la vida para el navegador.
 
@@ -234,6 +262,21 @@ def _event_model(event: PresentedEvent) -> PresentedEventModel:
             )
             for option in event.options
         ],
+    )
+
+
+def _summary_model(summary: LifeSummary) -> LifeSummaryModel:
+    return LifeSummaryModel(
+        age_reached=summary.age_reached,
+        cause_of_death=summary.cause_of_death,
+        by_system=BySystemModel(**{
+            name: SystemDigestModel(
+                events=digest.events,
+                decisions=digest.decisions,
+                highlights=digest.highlights,
+            )
+            for name, digest in summary.by_system.items()
+        }),
     )
 
 
@@ -396,6 +439,29 @@ def _build_app(repo: LivesRepo) -> FastAPI:
             dead=outcome.dead,
             cause_of_death=outcome.cause_of_death,
         )
+
+    @app.get(
+        "/lives/summary",
+        response_model=LifeSummaryModel,
+        operation_id="getSummary",
+        summary=(
+            "Resumen de fin de vida: edad alcanzada, causa de muerte y "
+            "desglose por educación, trabajo y relaciones (FR-005)"
+        ),
+    )
+    def get_summary(player_id: str = Depends(require_player_id)) -> LifeSummaryModel:
+        # `409` mientras la vida siga en curso y `404` si no existe: las dos
+        # compuertas del contrato las levanta `GameService.get_summary`.
+        return _summary_model(service.get_summary(player_id=player_id))
+
+    @app.delete(
+        "/lives",
+        status_code=204,
+        operation_id="deleteLife",
+        summary="Elimina la vida para empezar otra (FR-005)",
+    )
+    def delete_life(player_id: str = Depends(require_player_id)) -> None:
+        service.delete_life(player_id=player_id)
 
     return app
 

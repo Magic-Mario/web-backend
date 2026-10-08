@@ -30,6 +30,13 @@ Reglas de decisión (FR-005, SC-003):
 - la muerte por las 3 vías: opción `fatal`, probabilidad aleatoria
   (`0.01` con `YEAR`, `0.0008` con `MONTH`) y salud a `0`.
 
+Reglas de cierre (FR-005, data-model §2):
+
+- el resumen sólo existe con la vida terminada (`409` mientras corre) y se
+  **recalcula** en cada lectura agrupando `event_type` sobre el historial:
+  sin estadísticas derivadas guardadas;
+- `DELETE /lives` borra la partida para poder empezar otra (SC-004).
+
 La vida se guarda en `${PROJECT}-lives` con `PK = PLAYER#<uuid>` /
 `SK = STATE`; una segunda vida del mismo jugador choca con `409` porque en
 v1 solo hay una partida por jugador (FR-008).
@@ -83,6 +90,21 @@ EVENTS_PER_PERIOD: dict[Granularity, int] = {
 HAPPINESS_FLUCTUATION = 3
 HEALTH_DECAY_STEP_YEARS = 20
 
+#: FR-005: el resumen de fin de vida agrupa el historial por `event_type`.
+#: `COTIDIANO` queda **fuera** del desglose (T062).
+SYSTEM_BY_EVENT_TYPE: dict[EventType, str] = {
+    EventType.EDUCATIVO: "education",
+    EventType.LABORAL: "work",
+    EventType.RELACION: "relationships",
+    EventType.SENTIMENTAL: "relationships",
+}
+
+#: Los tres sistemas que el contrato exige, presentes aunque estén vacíos.
+SYSTEM_NAMES: tuple[str, ...] = ("education", "work", "relationships")
+
+#: `SystemDigest.highlights` tiene `maxItems: 5` en el contrato.
+MAX_HIGHLIGHTS = 5
+
 
 @dataclass(frozen=True)
 class AdvanceOutcome:
@@ -101,6 +123,28 @@ class DecisionOutcome:
     deltas: dict[str, int]
     dead: bool
     cause_of_death: CauseOfDeath | None
+
+
+@dataclass(frozen=True)
+class SystemDigest:
+    """Lo que dejó un sistema en el historial, para `LifeSummary.by_system`."""
+
+    events: int
+    decisions: int
+    highlights: list[str]
+
+
+@dataclass(frozen=True)
+class LifeSummary:
+    """Resumen de fin de vida (FR-005): se recalcula en cada lectura.
+
+    No se guarda ninguna estadística derivada (data-model §2): todo sale de
+    agrupar `event_type` sobre las filas `EVENT#<seq>` del historial.
+    """
+
+    age_reached: int
+    cause_of_death: CauseOfDeath
+    by_system: dict[str, SystemDigest]
 
 
 def natural_drift(life: Life, months: int) -> dict[str, int]:
@@ -323,6 +367,54 @@ class GameService:
             cause_of_death=cause,
         )
 
+    # --- US3: cierre de la vida -------------------------------------------
+
+    def get_summary(self, *, player_id: str) -> LifeSummary:
+        """Resumen de fin de vida (FR-005), recalculado desde el historial.
+
+        Sólo responde con la vida terminada; mientras sigue en curso el
+        contrato pide `409`, la compuerta que evita un resumen a mitad de
+        partida. Ninguna estadística se guarda derivada: todo sale de
+        agrupar `event_type` sobre las filas `EVENT#<seq>` (data-model §2).
+        """
+        life = self.get_life(player_id)
+        if life.is_alive:
+            raise DomainError("CONFLICT", "la vida sigue en curso")
+
+        cause = life.cause_of_death
+        if cause is None:
+            # Imposible en la práctica: `Life` exige causa al pasar a `DEAD`.
+            raise DomainError("CONFLICT", "la vida terminó sin causa registrada")
+
+        buckets: dict[str, list[LifeEvent]] = {name: [] for name in SYSTEM_NAMES}
+        for record in self._repo.list_events(player_id):
+            system = SYSTEM_BY_EVENT_TYPE.get(record.event_type)
+            if system is not None:
+                buckets[system].append(record)
+
+        return LifeSummary(
+            age_reached=life.age_years,
+            cause_of_death=cause,
+            by_system={
+                name: SystemDigest(
+                    events=len(rows),
+                    decisions=len(rows),
+                    # `list_events` viene ordenado por `SK`, así que `reversed`
+                    # deja lo más reciente al frente y se corta en 5.
+                    highlights=[record.text for record in reversed(rows)][
+                        :MAX_HIGHLIGHTS
+                    ],
+                )
+                for name, rows in buckets.items()
+            },
+        )
+
+    def delete_life(self, *, player_id: str) -> None:
+        """Borra la partida para empezar otra (FR-005, SC-004)."""
+        if self._repo.get_state(player_id) is None:
+            raise DomainError("NOT_FOUND", "no hay vida para este jugador")
+        self._repo.delete_state(player_id)
+
     # --- US2: obtención de sucesos ---------------------------------------
 
     def _next_event(self, life: Life) -> PresentedEvent:
@@ -383,7 +475,8 @@ class GameService:
             return CauseOfDeath.FATAL_OPTION
         if life.stats.health <= STAT_MIN:
             return CauseOfDeath.HEALTH_ZERO
-        if random.random() < life.random_death_probability:
+        # `≤` como en la transición del data-model (§1 «Transiciones de estado»).
+        if random.random() <= life.random_death_probability:
             return CauseOfDeath.FATAL_RANDOM
         return None
 

@@ -13,15 +13,19 @@ Cubre:
 
 El avance con el microservicio de verdad vive en `tests/test_advance.py`
 (T039); aquí se prueba el dominio, incluida la deriva como función pura.
-Las pruebas de muerte y resumen llegan con US3 (T066).
+Al final están las **3 vías de muerte**, la ausencia de edad máxima y el
+**cálculo del resumen** de fin de vida (T066 · US3).
 """
 
 from __future__ import annotations
 
+import random as _random
 import uuid
+from dataclasses import replace
 
 import pytest
 
+from domain import service as domain_service
 from domain.models import (
     INITIAL_STAT,
     RANDOM_DEATH_PROBABILITY,
@@ -32,6 +36,7 @@ from domain.models import (
     Gender,
     Granularity,
     Life,
+    LifeEvent,
     LifeStatus,
     PersonaCercana,
     PresentedEvent,
@@ -41,6 +46,7 @@ from domain.models import (
     Stats,
     STAT_NAMES,
 )
+from domain.service import GameService
 
 # --- Stats: escala 0–100 y nacimiento en 50 (FR-004, FR-010, SC-003) ------
 
@@ -367,3 +373,213 @@ def test_the_monthly_reserve_is_used_up_before_asking_again(
         }
     finally:
         service.repo.delete_state(player_id)
+
+
+# --- Muerte: las 3 vías de FR-005 (T066 · US3) -----------------------------
+
+
+class _FixedRng:
+    """Ruleta fija: `random()` devuelve siempre el valor que se le pide.
+
+    Sin ella la probabilidad real (1 % con `YEAR`, 0,08 % con `MONTH`)
+    convertiría estas pruebas en una moneda al aire. El resto de métodos
+    (`choice`, `randint`, …) delegan en el módulo `random` de verdad.
+    """
+
+    def __init__(self, roll: float) -> None:
+        self._roll = roll
+
+    def random(self) -> float:
+        return self._roll
+
+    def __getattr__(self, name: str):
+        return getattr(_random, name)
+
+
+def _kill_by_random(
+    service: GameService, born, monkeypatch, granularity: str = "YEAR"
+) -> str:
+    """Lleva una vida a `DEAD` por la vía aleatoria, sin depender de catálogos."""
+    player_id = born(granularity)
+    monkeypatch.setattr(domain_service, "random", _FixedRng(0.0))
+    service.advance_life(player_id=player_id)
+    outcome = service.submit_decision(player_id=player_id, option_id="opt-1")
+    assert outcome.dead and outcome.cause_of_death is CauseOfDeath.FATAL_RANDOM
+    return player_id
+
+
+def test_health_zero_ends_the_life(service: GameService, born) -> None:
+    """FR-005: la salud a 0 mata aunque la opción elegida no sea mortal."""
+    player_id = born()
+
+    # La deriva baja la salud un punto por año (dos a partir de los 20) y
+    # llega a 0 hacia los 35; se la ponemos a 0 para no recorrerlos todos.
+    life = service.get_life(player_id)
+    life.stats.health = 0
+    service.repo.put_state(life)
+
+    service.advance_life(player_id=player_id)
+    outcome = service.submit_decision(player_id=player_id, option_id="opt-2")
+
+    assert outcome.dead
+    assert outcome.cause_of_death is CauseOfDeath.HEALTH_ZERO
+    assert service.get_life(player_id).status is LifeStatus.DEAD
+
+
+def test_a_fatal_option_ends_the_life(service: GameService, born) -> None:
+    """FR-005a: la opción mortal mata en cuanto se elige."""
+    player_id = born()
+    service.advance_life(player_id=player_id)
+
+    life = service.get_life(player_id)
+    assert life.pending_event is not None
+    pending = life.pending_event
+    # Ni el evento ni sus opciones son mutables: se rehace el pendiente con
+    # la primera opción marcada como mortal, que es como llega del catálogo.
+    fatal_first = replace(pending.options[0], fatal=True)
+    life.pending_event = replace(
+        pending, options=[fatal_first, *pending.options[1:]]
+    )
+    service.repo.put_state(life)
+
+    outcome = service.submit_decision(player_id=player_id, option_id=fatal_first.id)
+
+    assert outcome.dead
+    assert outcome.cause_of_death is CauseOfDeath.FATAL_OPTION
+    assert outcome.life.stats.health > 0, "murió por la opción, no por la salud"
+
+
+@pytest.mark.parametrize(
+    ("granularity", "roll", "dies"),
+    [
+        # (granularidad, tirada de la ruleta, ¿muere?)
+        (Granularity.YEAR, 0.005, True),  # 0,005 ≤ 0,01
+        (Granularity.YEAR, 0.5, False),  # 0,5 > 0,01
+        (Granularity.MONTH, 0.005, False),  # 0,005 > 0,0008
+        (Granularity.MONTH, 0.0005, True),  # 0,0005 ≤ 0,0008
+    ],
+)
+def test_the_random_roll_uses_the_probability_of_the_granularity(
+    service: GameService,
+    born,
+    monkeypatch,
+    granularity: Granularity,
+    roll: float,
+    dies: bool,
+) -> None:
+    """FR-005: el riesgo se ajusta al período para que anualicen igual."""
+    player_id = born(granularity.value)
+    service.advance_life(player_id=player_id)
+    monkeypatch.setattr(domain_service, "random", _FixedRng(roll))
+
+    outcome = service.submit_decision(player_id=player_id, option_id="opt-2")
+
+    assert outcome.dead is dies, f"{granularity.value} con tirada {roll}"
+    assert (outcome.cause_of_death is CauseOfDeath.FATAL_RANDOM) is dies
+
+
+def test_there_is_no_age_ceiling(
+    service: GameService, born, events_service: object
+) -> None:
+    """Ni el catálogo (máx. 120 años) ni el dominio ponen techo a la edad."""
+    player_id = born()
+    life = service.get_life(player_id)
+    life.age_months = 130 * 12
+    service.repo.put_state(life)
+
+    outcome = service.advance_life(player_id=player_id)
+
+    assert outcome.life.age_years == 131
+    # A esa edad no queda suceso elegible → genérico en lugar de un error
+    # (edge case 104, `domain/generic_events.py`).
+    assert outcome.event.source is EventSource.SEED
+    assert outcome.event.options
+
+
+# --- Resumen de fin de vida: se calcula, no se guarda (FR-005 · T066) ------
+
+
+def _write_history(
+    service: GameService, player_id: str, rows: list[tuple[EventType, str]]
+) -> None:
+    """Escribe filas `EVENT#<seq>` con la misma forma que una partida real."""
+    start = service.get_life(player_id).sequence
+    for offset, (event_type, text) in enumerate(rows, start=1):
+        service.repo.put_event(
+            player_id,
+            LifeEvent(
+                seq=start + offset,
+                period_index=offset,
+                age_months=offset * 12,
+                year=1990 + offset,
+                event_id=f"ev-{offset:03d}",
+                event_type=event_type,
+                text=text,
+                option_id="opt-1",
+                deltas={},
+                fatal=False,
+                source=EventSource.SEED,
+            ),
+        )
+
+
+def test_the_summary_groups_the_history_by_system(
+    service: GameService, born, monkeypatch
+) -> None:
+    """FR-005 / T062: agrupar por `event_type`; `COTIDIANO` queda fuera."""
+    player_id = _kill_by_random(service, born, monkeypatch)
+    _write_history(
+        service,
+        player_id,
+        [
+            (EventType.COTIDIANO, "Un día cualquiera"),
+            (EventType.EDUCATIVO, "Terminaste la primaria"),
+            (EventType.EDUCATIVO, "Terminaste la universidad"),
+            (EventType.LABORAL, "Tu primer empleo"),
+            (EventType.RELACION, "Conociste a un amigo"),
+            (EventType.SENTIMENTAL, "Conociste a tu pareja"),
+        ],
+    )
+
+    summary = service.get_summary(player_id=player_id)
+
+    assert summary.age_reached == 1
+    assert summary.cause_of_death is CauseOfDeath.FATAL_RANDOM
+    assert set(summary.by_system) == {"education", "work", "relationships"}
+
+    education = summary.by_system["education"]
+    assert (education.events, education.decisions) == (2, 2)
+    # Lo más reciente primero: es lo que acaba de pasar en la partida.
+    assert education.highlights == [
+        "Terminaste la universidad",
+        "Terminaste la primaria",
+    ]
+
+    assert (summary.by_system["work"].events) == 1
+    # RELACIÓN y SENTIMENTAL comparten sistema.
+    assert (summary.by_system["relationships"].events) == 2
+    assert summary.by_system["relationships"].highlights == [
+        "Conociste a tu pareja",
+        "Conociste a un amigo",
+    ]
+    # COTIDIANO no cuenta en ningún sistema: sólo salen los tres del contrato.
+    assert sum(digest.events for digest in summary.by_system.values()) == 5
+
+
+def test_the_summary_highlights_stop_at_five(
+    service: GameService, born, monkeypatch
+) -> None:
+    """`SystemDigest.highlights` declara `maxItems: 5` en el contrato."""
+    player_id = _kill_by_random(service, born, monkeypatch)
+    _write_history(
+        service,
+        player_id,
+        [(EventType.EDUCATIVO, f"Etapa {index}") for index in range(7)],
+    )
+
+    digest = service.get_summary(player_id=player_id).by_system["education"]
+
+    assert (digest.events, digest.decisions) == (7, 7)
+    assert len(digest.highlights) == 5
+    assert digest.highlights[0] == "Etapa 6", "deben ser los 5 más recientes"
+    assert digest.highlights[-1] == "Etapa 2"

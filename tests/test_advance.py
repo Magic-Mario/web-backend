@@ -21,8 +21,7 @@ Cubre lo que pide T039:
 
 from __future__ import annotations
 
-import uuid
-from typing import Callable, Iterator
+from typing import Callable
 
 import pytest
 
@@ -31,35 +30,8 @@ from domain.service import GameService
 from grpc_client.events import EventsClient
 from persistence.lives_repo import LivesRepo
 
-#: Nacimiento válido: el catálogo de nacimiento (FR-001) acepta `AR`/Buenos Aires.
-BIRTH: dict[str, object] = {
-    "gender": "MALE",
-    "country": "AR",
-    "city": "Buenos Aires",
-    "birth_year": 1990,
-}
-
-
-@pytest.fixture
-def service() -> GameService:
-    """Servicio real sobre `${PROJECT}-lives`: las pruebas persisten de verdad."""
-    return GameService(LivesRepo())
-
-
-@pytest.fixture
-def born(service: GameService) -> Iterator[Callable[..., str]]:
-    """Fábrica de vidas que garantiza la limpieza de lo que cree cada test."""
-    created: list[str] = []
-
-    def _born(granularity: str = "YEAR") -> str:
-        player_id = str(uuid.uuid4())
-        service.create_life(player_id=player_id, granularity=granularity, **BIRTH)
-        created.append(player_id)
-        return player_id
-
-    yield _born
-    for player_id in created:
-        service.repo.delete_state(player_id)
+# `service`, `born` y `events_service` los define `tests/conftest.py`: los
+# comparten `test_advance.py`, `test_summary.py` y `test_domain.py`.
 
 
 def _decide(service: GameService, player_id: str) -> object:

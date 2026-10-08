@@ -26,15 +26,46 @@ jobs:
       - name: Previous contracts tag
         id: prev
         run: |
+          # El contrato vivo es el tag contracts/v* más alto; el previo es el
+          # siguiente de la lista. Si hay un solo tag, ambos coinciden y la
+          # comparación es contra sí mismo (no hay baseline que romper).
+          CUR=$(git tag --list 'contracts/v*' --sort=-v:refname | sed -n '1p')
           PREV=$(git tag --list 'contracts/v*' --sort=-v:refname | sed -n '2p')
-          echo "tag=${PREV:-contracts/v1.0.0}" >> "$GITHUB_OUTPUT"
+          CUR=${CUR:-$PREV}
+          PREV=${PREV:-${CUR:-contracts/v1.0.0}}
+          # Un bump MAYOR es la señal sancionada de que el breaking change es
+          # intencionado (Decisión 13: v1.0.0 finanzas -> v2.0.0 juego es un
+          # reemplazo total). Sin él, cualquier breaking falla el pipeline.
+          cur=${CUR#contracts/v}; cur=${cur%%.*}
+          prev=${PREV#contracts/v}; prev=${prev%%.*}
+          BUMP=false
+          if [ "$CUR" != "$PREV" ] && [ "${cur:-0}" -gt "${prev:-0}" ] 2>/dev/null; then
+            BUMP=true
+          fi
+          echo "contrato=$CUR previo=$PREV major_bump=$BUMP"
+          {
+            echo "cur=$CUR"
+            echo "tag=$PREV"
+            echo "major_bump=$BUMP"
+          } >> "$GITHUB_OUTPUT"
       - uses: bufbuild/buf-setup-action@v1
       - name: buf breaking (proto vs tag previo)
+        if: steps.prev.outputs.major_bump != 'true'
         run: |
+          # T071 apuntó aquí a proto/events.proto, pero lo que se lee es el
+          # fichero DEL TAG PREVIO: en contracts/v1.0.0 era proto/finance.proto
+          # (package finance.v1), así que `git show` fallaba con fatal. Sin
+          # baseline del mismo contrato no hay nada que comparar.
+          if ! git cat-file -e "${{ steps.prev.outputs.tag }}:proto/events.proto" 2>/dev/null; then
+            echo "El tag previo ${{ steps.prev.outputs.tag }} no tiene proto/events.proto:"
+            echo "es el contrato anterior (otro paquete), no hay baseline. OK."
+            exit 0
+          fi
           git show '${{ steps.prev.outputs.tag }}:proto/events.proto' > /tmp/prev.proto
           buf breaking --against /tmp/prev.proto --path proto/events.proto
         working-directory: .
       - name: OpenAPI diff vs tag previo
+        if: steps.prev.outputs.major_bump != 'true'
         run: |
           git show '${{ steps.prev.outputs.tag }}:contracts/openapi.yaml' > /tmp/prev-openapi.yaml
           docker run --rm -v "$PWD:/w" -v /tmp:/t \

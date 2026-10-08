@@ -426,7 +426,12 @@ class GameService:
         if not served:
             # Edge case de la spec: estado controlado, nunca un error que
             # bloquee la partida (ni un evento inexistente que rompa el contrato).
-            return generic_event(life.consumed_ids, year=life.current_year)
+            return generic_event(
+                life.consumed_ids,
+                year=life.current_year,
+                age_years=life.age_years,
+                period_index=life.period_index,
+            )
 
         life.reserve = served[1:]
         return served[0]

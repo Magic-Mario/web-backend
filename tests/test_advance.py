@@ -225,6 +225,41 @@ def test_the_advance_survives_the_events_service_being_down(
     assert unreachable.get_life(player_id).age_months == 12
 
 
+def test_the_generic_fallback_respects_the_age_range(
+    born: Callable[..., str],
+) -> None:
+    """FR-013: **cada** evento declara su rango de edad, el genérico también.
+
+    Sin este filtro, con el microservicio caído un bebé recibiría «Llega de
+    última hora una oferta de trabajo»: el rango es el mismo que declara el
+    microservicio en `proto/events.proto`.
+    """
+    player_id = born()
+    unreachable = GameService(
+        LivesRepo(), events=EventsClient(address="127.0.0.1:1", timeout=0.2)
+    )
+    min_age = {
+        "generic-cotidiano": 0,
+        "generic-educativo": 6,
+        "generic-laboral": 18,
+        "generic-relacion": 0,
+        "generic-sentimental": 14,
+    }
+
+    seen: list[tuple[int, str]] = []
+    for _ in range(20):
+        outcome = unreachable.advance_life(player_id=player_id)
+        seen.append((outcome.life.age_years, outcome.event.id))
+        unreachable.submit_decision(player_id=player_id, option_id="opt-2")
+
+    for age, event_id in seen:
+        assert age >= min_age[event_id], f"{event_id} servido a los {age} años"
+    # Los cinco tipos acaban saliendo: el ciclo no se queda atascado…
+    assert {event_id for _, event_id in seen} == set(min_age)
+    # …y nunca se repite uno tras otro mientras haya otro de su edad.
+    assert all(before[1] != after[1] for before, after in zip(seen, seen[1:]))
+
+
 # --- SC-006: recargar sin perder el progreso -------------------------------
 
 

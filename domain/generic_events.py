@@ -12,7 +12,9 @@ recurre a eventos genéricos"*). Por eso `source = SEED` y por eso sólo lleva
 las **2 opciones no mortales** de cada tipo: matar por una red de seguridad
 sería justo lo contrario.
 
-Los 5 tipos de FR-003 están representados.
+Los 5 tipos de FR-003 están representados, y **cada uno declara su rango de
+edad** como pide FR-013: un suceso genérico tampoco se presenta fuera de su
+edad (a un recién nacido no se le ofrece una oferta de trabajo).
 """
 
 from __future__ import annotations
@@ -21,12 +23,15 @@ from collections.abc import Iterable
 
 from .models import EventOption, EventSource, EventType, PresentedEvent
 
-#: `id → tipo → enunciado → opciones`. Los ids son estables, para poder
-#: filtrarlos con `consumed_ids` y no repetir el mismo genérico seguido.
+#: `id → tipo → rango de edad → enunciado → opciones`. Los ids son
+#: estables, para poder filtrarlos con `consumed_ids` y no repetir el mismo
+#: genérico seguido. Los rangos repiten los del microservicio (FR-013).
 _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
     {
         "id": "generic-cotidiano",
         "type": EventType.COTIDIANO,
+        "min_age": 0,
+        "max_age": 120,
         "text": "Un imprevisto doméstico tuerce el plan que tenías para el día.",
         "options": (
             ("opt-1", "Afrontarlo con calma", {"happiness": 4, "health": -1}),
@@ -36,6 +41,8 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
     {
         "id": "generic-educativo",
         "type": EventType.EDUCATIVO,
+        "min_age": 6,
+        "max_age": 30,
         "text": "Se abre en tu barrio un taller formativo al que te puedes apuntar.",
         "options": (
             ("opt-1", "Apuntarte y aprovecharlo", {"intelligence": 6, "happiness": -1}),
@@ -45,6 +52,8 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
     {
         "id": "generic-laboral",
         "type": EventType.LABORAL,
+        "min_age": 18,
+        "max_age": 120,
         "text": "Llega de última hora una oferta de trabajo que no esperabas.",
         "options": (
             ("opt-1", "Presentarte sin dudarlo", {"intelligence": 4, "health": -2}),
@@ -54,6 +63,8 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
     {
         "id": "generic-relacion",
         "type": EventType.RELACION,
+        "min_age": 0,
+        "max_age": 120,
         "text": (
             "Un amigo de la vida aparece por sorpresa y os ponéis a hablar "
             "de lo de antes."
@@ -66,6 +77,8 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
     {
         "id": "generic-sentimental",
         "type": EventType.SENTIMENTAL,
+        "min_age": 14,
+        "max_age": 120,
         "text": "Conoces a alguien con quien la conversación fluye sin esfuerzo.",
         "options": (
             ("opt-1", "Seguir hablando", {"happiness": 7, "looks": 1}),
@@ -75,20 +88,32 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
 )
 
 
-def generic_event(consumed_ids: Iterable[str], *, year: int) -> PresentedEvent:
-    """Devuelve un suceso genérico **aún no presentado**.
+def generic_event(
+    consumed_ids: Iterable[str], *, year: int, age_years: int, period_index: int
+) -> PresentedEvent:
+    """Devuelve un suceso genérico **aún no presentado** y de su edad (FR-013).
 
-    Si ya se gastaron todos (vida muy larga con el microservicio caído),
-    empieza el ciclo de nuevo: repetir un suceso concreto es preferible a
-    dejar el avance sin evento.
+    Se elige entre los que caben en el rango de edad del personaje y, de
+    ellos, primero uno que todavía no se haya presentado. Cuando ya se
+    gastaron todos —vida muy larga con el microservicio caído— el ciclo se
+    gira con el número de período, para no clavarse siempre en el mismo.
+
+    Si a esa edad no cabe **ningún** rango (un personaje de más de 120
+    años, más allá del catálogo real) se amplía a los cinco: repetir un
+    suceso es preferible a dejar el avance sin evento, que es justo lo que
+    piden los *edge cases* 103–105.
     """
     consumed = set(consumed_ids)
-    pending = [
-        spec
-        for spec in _GENERIC_EVENTS
-        if str(spec["id"]) not in consumed
-    ]
-    spec = pending[0] if pending else _GENERIC_EVENTS[0]
+
+    def within_range(spec: dict[str, object]) -> bool:
+        return int(spec["min_age"]) <= age_years <= int(spec["max_age"])
+
+    pool = [spec for spec in _GENERIC_EVENTS if within_range(spec)]
+    if not pool:
+        pool = list(_GENERIC_EVENTS)
+
+    fresh = [spec for spec in pool if str(spec["id"]) not in consumed]
+    spec = fresh[0] if fresh else pool[(period_index - 1) % len(pool)]
 
     return PresentedEvent(
         id=str(spec["id"]),

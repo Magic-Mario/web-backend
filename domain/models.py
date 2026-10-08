@@ -311,6 +311,11 @@ class LifeEvent:
     deltas: dict[str, int]
     fatal: bool
     source: EventSource
+    #: Etiqueta de la opción elegida, conocida en el momento de decidir.
+    #: **Aditivo**: las filas antiguas, escritas antes de este campo, se
+    #: leen con `""` (`from_dict`), y `GET /lives/events` sustituye ese
+    #: vacío por el propio `option_label`/`option_id`.
+    option_label: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -322,6 +327,7 @@ class LifeEvent:
             "event_type": self.event_type.value,
             "text": self.text,
             "option_id": self.option_id,
+            "option_label": self.option_label,
             "deltas": dict(self.deltas),
             "fatal": self.fatal,
             "source": self.source.value,
@@ -338,6 +344,8 @@ class LifeEvent:
             event_type=EventType(data["event_type"]),
             text=data["text"],
             option_id=data["option_id"],
+            # Filas escritas sin la etiqueta: defecto seguro, nunca un error.
+            option_label=str(data.get("option_label") or ""),
             deltas={k: int(v) for k, v in (data.get("deltas") or {}).items()},
             fatal=bool(data.get("fatal", False)),
             source=EventSource(data["source"]),

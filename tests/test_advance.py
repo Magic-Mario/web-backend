@@ -108,7 +108,8 @@ def test_the_drift_is_reported_apart_and_the_decision_sits_on_top_of_it(
 
     # `derived` es la deriva natural de este período, no la del evento.
     assert set(outcome.derived) == {"health", "happiness"}
-    assert outcome.derived["health"] <= 0
+    # Primer año de vida: la deriva es amable con los jóvenes (FR-011).
+    assert outcome.derived["health"] == 1
     assert -3 <= outcome.derived["happiness"] <= 3
     assert outcome.life.stats.health == before.stats.health + outcome.derived["health"]
     assert (
@@ -223,6 +224,37 @@ def test_the_advance_survives_the_events_service_being_down(
     # La deriva natural se aplica aunque no haya suceso de época (FR-011).
     assert set(outcome.derived) == {"health", "happiness"}
     assert unreachable.get_life(player_id).age_months == 12
+
+
+def test_a_generic_option_can_raise_health(born: Callable[..., str]) -> None:
+    """La salud no sólo baja: de joven sube y las opciones genéricas ayudan.
+
+    Comprueba las dos fuentes de subida de la salud en una partida real con
+    el microservicio caído: la deriva de joven (+1 al cumplir años) y una
+    opción genérica positiva (`domain/generic_events.py`).
+    """
+    player_id = born()
+    unreachable = GameService(
+        LivesRepo(), events=EventsClient(address="127.0.0.1:1", timeout=0.2)
+    )
+
+    outcome = unreachable.advance_life(player_id=player_id)
+
+    # Deriva joven: el primer cumpleaños recupera salud en vez de consumirla.
+    assert outcome.derived["health"] == 1
+    before = outcome.life.stats.health
+
+    positive = next(
+        option
+        for option in outcome.event.options
+        if option.deltas.get("health", 0) > 0
+    )
+    decision = unreachable.submit_decision(
+        player_id=player_id, option_id=positive.id
+    )
+
+    assert decision.deltas["health"] > 0
+    assert unreachable.get_life(player_id).stats.health > before
 
 
 def test_the_generic_fallback_respects_the_age_range(

@@ -36,6 +36,7 @@ from domain.models import (
     Gender,
     Granularity,
     Life,
+    LifeEvent,
     LifeStatus,
     PersonState,
     PresentedEvent,
@@ -217,6 +218,41 @@ class LifeSummaryModel(BaseModel):
     by_system: BySystemModel
 
 
+class EventHistoryItem(BaseModel):
+    """Una fila del historial (`EVENT#<seq:06d>`) vista por el navegador.
+
+    A diferencia de `PresentedEvent`, aquí sí viajan `deltas` y
+    `option_label`: es el relato de lo **ya decidido**, no una opción que
+    esté en juego. `age_years` se deriva de `age_months` para que la
+    interfaz no tenga que recalcularlo.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    seq: int
+    period_index: int
+    age_months: int
+    age_years: int
+    event_id: str
+    type: EventType
+    text: str
+    option_id: str
+    option_label: str
+    deltas: dict[str, int]
+    fatal: bool
+    source: EventSource
+
+
+class EventHistoryResponse(BaseModel):
+    """`GET /lives/events`: el histórico completo en orden cronológico."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    player_id: str
+    count: int
+    events: list[EventHistoryItem]
+
+
 def _life_model(life: Life, *, with_pending: bool = False) -> LifeModel:
     """Serializa la vida para el navegador.
 
@@ -277,6 +313,29 @@ def _summary_model(summary: LifeSummary) -> LifeSummaryModel:
             )
             for name, digest in summary.by_system.items()
         }),
+    )
+
+
+def _history_item(record: LifeEvent) -> EventHistoryItem:
+    """Vista de navegador de una fila ya resuelta del historial.
+
+    `option_label` es aditivo: las filas antiguas, escritas sin etiqueta,
+    se leen vacías y aquí se sustituyen por `option_id` para que la
+    interfaz siempre tenga algo que enseñar.
+    """
+    return EventHistoryItem(
+        seq=record.seq,
+        period_index=record.period_index,
+        age_months=record.age_months,
+        age_years=record.age_months // 12,
+        event_id=record.event_id,
+        type=record.event_type,
+        text=record.text,
+        option_id=record.option_id,
+        option_label=record.option_label or record.option_id,
+        deltas=dict(record.deltas),
+        fatal=record.fatal,
+        source=record.source,
     )
 
 
@@ -453,6 +512,26 @@ def _build_app(repo: LivesRepo) -> FastAPI:
         # `409` mientras la vida siga en curso y `404` si no existe: las dos
         # compuertas del contrato las levanta `GameService.get_summary`.
         return _summary_model(service.get_summary(player_id=player_id))
+
+    @app.get(
+        "/lives/events",
+        response_model=EventHistoryResponse,
+        operation_id="getEventHistory",
+        summary=(
+            "Histórico cronológico de los sucesos ya vividos, con la opción "
+            "elegida y sus deltas (data-model §2)"
+        ),
+    )
+    def get_event_history(
+        player_id: str = Depends(require_player_id),
+    ) -> EventHistoryResponse:
+        # `404` si la vida no existe (igual que `GET /lives`) y `[]` si
+        # existe pero todavía no se ha resuelto ningún período.
+        records = service.get_event_history(player_id=player_id)
+        events = [_history_item(record) for record in records]
+        return EventHistoryResponse(
+            player_id=player_id, count=len(events), events=events
+        )
 
     @app.delete(
         "/lives",

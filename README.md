@@ -51,7 +51,11 @@ Reglas de juego (`domain/service.py`):
   mismo jugador → `409`.
 - **Avance**: suma 12 meses (`YEAR`) o 1 (`MONTH`), aplica deriva natural y
   presenta **un solo suceso** que queda pendiente de decisión; el microservicio
-  sólo se consulta cuando `reserve` se vacía.
+  sólo se consulta cuando `reserve` se vacía. La deriva de salud es amable de
+  joven (**+1** punto por año cumplido hasta los 40) y netamente negativa en la
+  vejez (−1 a partir de los 40, y un punto más cada 20 años: −2 a los 60, −3 a
+  los 80…), de modo que la salud se puede recuperar de joven y la muerte por
+  salud a `0` sigue siendo posible de mayor.
 - **Decisión**: aplica los `deltas` sobre las stats y resuelve la muerte por
   una de las tres vías; cada período resuelto se guarda como historial.
 - **Cierre**: el resumen existe sólo con la vida terminada y se recalcula en
@@ -71,7 +75,7 @@ Persistencia (`persistence/lives_repo.py`), con `PROJECT=life-simulator-mvp`:
 
 ## Rutas del contrato
 
-Las 8 `operationId` de `contracts/openapi.yaml`, servidas **en la raíz y bajo
+Las 9 `operationId` de `contracts/openapi.yaml`, servidas **en la raíz y bajo
 `/api`** (prefijo que publica el ALB):
 
 | Método | Ruta | Propósito | Códigos relevantes |
@@ -83,9 +87,10 @@ Las 8 `operationId` de `contracts/openapi.yaml`, servidas **en la raíz y bajo
 | `POST` | `/lives/advance` | avanza un período y presenta un suceso con sus opciones | `200`, `404`, `409` (vida muerta o suceso sin decidir) |
 | `POST` | `/lives/decision` | registra la opción, aplica deltas y resuelve la muerte | `200`, `404`, `409` (sin suceso pendiente) |
 | `GET` | `/lives/summary` | resumen de fin de vida: edad, causa y desglose | `200`, `404`, `409` (la vida sigue en curso) |
+| `GET` | `/lives/events` | histórico cronológico de sucesos ya vividos, con opción elegida y deltas | `200`, `404` |
 | `DELETE` | `/lives` | borra la partida para empezar otra (SC-004) | `204`, `404` |
 
-**Identidad anónima** (FR-008): las 6 rutas de vida exigen la cabecera
+**Identidad anónima** (FR-008): las 7 rutas de vida exigen la cabecera
 `X-Player-Id` (UUID v4 generado en el navegador; sin cuentas ni cookies);
 `GET /health` y `GET /catalog/birth` **no** la exigen. Una cabecera ausente o
 mal formada devuelve `422`.
@@ -142,7 +147,7 @@ Ver `docs/LOCAL_DEV.md` en `cloud-project-infra` para el stack completo.
 
 ## Contratos como fuente de verdad
 
-`contracts/openapi.yaml` (8 `operationId`) y `proto/events.proto` (`events.v1`,
+`contracts/openapi.yaml` (9 `operationId`) y `proto/events.proto` (`events.v1`,
 servicio `EventsService`) **mandan sobre el código**: el frontend los
 vendoriza, `web-events-service` comparte el mismo `.proto` byte a byte y las
 pruebas de contrato (`tests/test_rest_contract.py`, `tests/test_grpc_contract.py`)

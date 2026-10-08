@@ -239,8 +239,8 @@ def _event(event_id: str) -> PresentedEvent:
     )
 
 
-def test_natural_drift_decays_health_only_when_a_year_completes() -> None:
-    """FR-011: la salud baja con la edad; la felicidad fluctúa siempre."""
+def test_natural_drift_only_touches_health_when_a_year_completes() -> None:
+    """FR-011: la salud sólo se toma al cumplir años; la felicidad, siempre."""
     from domain.service import natural_drift
 
     plain_month = natural_drift(
@@ -249,36 +249,58 @@ def test_natural_drift_decays_health_only_when_a_year_completes() -> None:
     assert plain_month["health"] == 0
     assert -3 <= plain_month["happiness"] <= 3
 
+    # 71 meses + 1 = 72: los 6 años cumplidos, ahí sí se toma la salud.
     birthday = natural_drift(
         _life(age_months=71, granularity=Granularity.MONTH), 1
     )
-    assert birthday["health"] == -1
+    assert birthday["health"] == 1
     assert -3 <= birthday["happiness"] <= 3
 
 
-def test_the_health_decay_grows_with_the_age() -> None:
-    """Es la deriva la que permite terminar una vida sin edad máxima."""
+def test_health_recovers_while_young_and_decays_in_old_age() -> None:
+    """La salud es una stat jugable: de joven sube, en la vejez decae."""
     from domain.service import natural_drift
 
-    at_birth = natural_drift(_life(age_months=0), 12)
-    at_twenty = natural_drift(_life(age_months=240), 12)
+    # Por debajo de los 40 la deriva sólo puede subir: 0→1, 20→21 y 39→40.
+    assert natural_drift(_life(age_months=0), 12)["health"] == 1
+    assert natural_drift(_life(age_months=240), 12)["health"] == 1
+    assert natural_drift(_life(age_months=467), 1)["health"] == 1
 
-    assert at_birth["health"] == -1
-    assert at_twenty["health"] == -2
-    assert at_twenty["health"] < at_birth["health"]
+    # A partir del pico es negativa y se acelera con los años.
+    at_forty = natural_drift(_life(age_months=468), 12)["health"]
+    at_sixty = natural_drift(_life(age_months=708), 12)["health"]
+    at_eighty = natural_drift(_life(age_months=948), 12)["health"]
+
+    assert (at_forty, at_sixty, at_eighty) == (-1, -2, -3)
+    assert at_forty > at_sixty > at_eighty, "el decayimiento debe crecer"
+
+
+def test_old_age_can_drain_health_to_zero() -> None:
+    """Es la deriva de la vejez la que permite morir por salud a 0 (FR-005)."""
+    from domain.service import natural_drift
+
+    health = 100
+    drained_at: int | None = None
+    for age_months in range(40 * 12, 101 * 12, 12):
+        health = max(0, health + natural_drift(_life(age_months=age_months), 12)["health"])
+        if health == 0 and drained_at is None:
+            drained_at = age_months // 12
+
+    assert health == 0
+    assert drained_at is not None and drained_at < 101, "la salud debe llegar a 0"
 
 
 def test_the_annual_health_loss_is_the_same_in_both_granularities() -> None:
     """El riesgo anualizado no depende de la granularidad (FR-011, FR-005)."""
     from domain.service import natural_drift
 
-    yearly = natural_drift(_life(age_months=60, granularity=Granularity.YEAR), 12)
+    yearly = natural_drift(_life(age_months=948, granularity=Granularity.YEAR), 12)
     monthly = sum(
-        natural_drift(_life(age_months=60 + step), 1)["health"]
+        natural_drift(_life(age_months=948 + step), 1)["health"]
         for step in range(12)
     )
 
-    assert yearly["health"] == monthly == -1
+    assert yearly["health"] == monthly == -3
 
 
 def test_the_event_limit_is_set_by_the_granularity() -> None:
@@ -412,13 +434,17 @@ def test_health_zero_ends_the_life(service: GameService, born) -> None:
     """FR-005: la salud a 0 mata aunque la opción elegida no sea mortal."""
     player_id = born()
 
-    # La deriva baja la salud un punto por año (dos a partir de los 20) y
-    # llega a 0 hacia los 35; se la ponemos a 0 para no recorrerlos todos.
+    # De joven la deriva **sube** la salud, así que la muerte por salud
+    # corresponde a la vejez:3 puntos menos al cumplir 81 años (80 → -3).
     life = service.get_life(player_id)
-    life.stats.health = 0
+    life.age_months = 80 * 12
+    life.stats.health = 3
     service.repo.put_state(life)
 
-    service.advance_life(player_id=player_id)
+    outcome_advance = service.advance_life(player_id=player_id)
+    assert outcome_advance.derived["health"] == -3
+    assert outcome_advance.life.stats.health == 0
+
     outcome = service.submit_decision(player_id=player_id, option_id="opt-2")
 
     assert outcome.dead

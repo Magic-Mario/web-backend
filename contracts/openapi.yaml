@@ -176,6 +176,36 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /lives/events:
+    parameters:
+      - $ref: "#/components/parameters/PlayerId"
+    get:
+      operationId: getEventHistory
+      summary: >
+        Histórico cronológico de los sucesos ya vividos, con la opción
+        elegida y sus deltas (data-model §2)
+      responses:
+        "200":
+          description: >
+            histórico en orden cronológico (seq ascendente); lista vacía si
+            la vida existe pero aún no ha resuelto ningún período
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventHistory"
+        "404":
+          description: no hay vida para este jugador
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: falta o es inválida la cabecera X-Player-Id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+
   /catalog/birth:
     get:
       operationId: getBirthCatalog
@@ -430,6 +460,76 @@ components:
             type: string
           maxItems: 5
           example: ["Terminaste la universidad", "Conociste a tu pareja"]
+
+    EventHistory:
+      type: object
+      description: >
+        Histórico de sucesos ya vividos de una vida, en orden cronológico
+        (seq ascendente).
+      required: [player_id, count, events]
+      properties:
+        player_id:
+          type: string
+          format: uuid
+        count:
+          type: integer
+          description: nº de eventos del histórico
+          example: 2
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/EventHistoryItem"
+
+    EventHistoryItem:
+      type: object
+      required: [seq, period_index, age_months, age_years, event_id, type,
+                 text, option_id, option_label, deltas, fatal, source]
+      properties:
+        seq:
+          type: integer
+          description: nº de evento; orden cronológico lexicográfico en `EVENT#<seq:06d>`
+          example: 1
+        period_index:
+          type: integer
+          example: 1
+        age_months:
+          type: integer
+          example: 12
+        age_years:
+          type: integer
+          description: edad cumplida al resolver el período (age_months / 12)
+          example: 1
+        event_id:
+          type: string
+          example: generic-cotidiano
+        type:
+          type: string
+          enum: [COTIDIANO, EDUCATIVO, LABORAL, RELACION, SENTIMENTAL]
+        text:
+          type: string
+          example: "Un imprevisto doméstico tuerce el plan que tenías para el día."
+        option_id:
+          type: string
+          example: "opt-1"
+        option_label:
+          type: string
+          description: >
+            etiqueta de la opción elegida; en las filas antiguas, escritas
+            sin etiqueta, se devuelve el propio option_id
+          example: "Afrontarlo con calma"
+        deltas:
+          type: object
+          description: cambio que aplicó la decisión sobre las stats (SC-003)
+          additionalProperties:
+            type: integer
+          example: { happiness: 4, health: 1 }
+        fatal:
+          type: boolean
+          example: false
+        source:
+          type: string
+          enum: [WIKIPEDIA, SEED]
+          description: SEED cuando falló la búsqueda externa (edge cases)
 
     BirthCatalog:
       type: object

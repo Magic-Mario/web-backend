@@ -15,6 +15,13 @@ sería justo lo contrario.
 Los 5 tipos de FR-003 están representados, y **cada uno declara su rango de
 edad** como pide FR-013: un suceso genérico tampoco se presenta fuera de su
 edad (a un recién nacido no se le ofrece una oferta de trabajo).
+
+La salud es una **stat jugable**, no un cuentakilómetros de muerte: el
+catálogo mezcla opciones que la suben (afrontar el imprevisto con calma,
+reservar la tarde para descansar, rechazar sin culpa, quedar a dar un
+paseo) y opciones que la bajan (estrés acumulado, noches de estudio,
+exceso de trabajo, aislamiento), y las otras tres stats conservan su
+mezcla habitual de positivos y negativos.
 """
 
 from __future__ import annotations
@@ -26,6 +33,14 @@ from .models import EventOption, EventSource, EventType, PresentedEvent
 #: `id → tipo → rango de edad → enunciado → opciones`. Los ids son
 #: estables, para poder filtrarlos con `consumed_ids` y no repetir el mismo
 #: genérico seguido. Los rangos repiten los del microservicio (FR-013).
+#:
+#: Los `deltas` de salud van **en las dos direcciones** (4 opciones que la
+#: suben y 4 que la bajan), para que cuidarse sea una decisión de juego:
+#: afrontar con calma, descansar la tarde, rechazar sin culpa o quedar a
+#: dar un paseo la recuperan; el estrés acumulado, el estudio a marchas
+#: forzadas, el exceso de trabajo y el aislamiento la consumen.
+#: `happiness`, `intelligence` y `looks` siguen con su mezcla de signos de
+#: siempre.
 _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
     {
         "id": "generic-cotidiano",
@@ -34,8 +49,12 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
         "max_age": 120,
         "text": "Un imprevisto doméstico tuerce el plan que tenías para el día.",
         "options": (
-            ("opt-1", "Afrontarlo con calma", {"happiness": 4, "health": -1}),
-            ("opt-2", "Dejarlo para mañana", {"happiness": -3, "intelligence": 1}),
+            ("opt-1", "Afrontarlo con calma", {"happiness": 4, "health": 1}),
+            (
+                "opt-2",
+                "Dejarlo para mañana",
+                {"happiness": -3, "intelligence": 1, "health": -1},
+            ),
         ),
     },
     {
@@ -45,8 +64,16 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
         "max_age": 30,
         "text": "Se abre en tu barrio un taller formativo al que te puedes apuntar.",
         "options": (
-            ("opt-1", "Apuntarte y aprovecharlo", {"intelligence": 6, "happiness": -1}),
-            ("opt-2", "Pasarlo por alto", {"happiness": 2, "intelligence": -1}),
+            (
+                "opt-1",
+                "Apuntarte y aprovecharlo",
+                {"intelligence": 6, "happiness": -1, "health": -1, "looks": -1},
+            ),
+            (
+                "opt-2",
+                "Pasarlo por alto",
+                {"happiness": 2, "intelligence": -1, "health": 1},
+            ),
         ),
     },
     {
@@ -57,7 +84,11 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
         "text": "Llega de última hora una oferta de trabajo que no esperabas.",
         "options": (
             ("opt-1", "Presentarte sin dudarlo", {"intelligence": 4, "health": -2}),
-            ("opt-2", "Rechazarla y seguir como estás", {"happiness": 3, "intelligence": -1}),
+            (
+                "opt-2",
+                "Rechazarla y seguir como estás",
+                {"happiness": 3, "intelligence": -1, "health": 1},
+            ),
         ),
     },
     {
@@ -70,8 +101,10 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
             "de lo de antes."
         ),
         "options": (
-            ("opt-1", "Quedar para recuperar el tiempo", {"happiness": 6, "health": -1}),
-            ("opt-2", "Dejarlo estar", {"happiness": -4}),
+            # Un paseo y una conversación al aire libre: la mejor fuente
+            # positiva de salud del catálogo genérico.
+            ("opt-1", "Quedar para recuperar el tiempo", {"happiness": 6, "health": 2}),
+            ("opt-2", "Dejarlo estar", {"happiness": -4, "health": -1}),
         ),
     },
     {

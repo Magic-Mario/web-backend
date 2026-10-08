@@ -83,12 +83,22 @@ EVENTS_PER_PERIOD: dict[Granularity, int] = {
     Granularity.MONTH: 2,
 }
 
-#: FR-011: deriva natural. La salud baja con la edad —un punto por año
-#: cumplido, y uno más cada 20 años— y la felicidad fluctúa en ±3 cada
+#: FR-011: deriva natural. La salud es una stat **jugable**: de joven se
+#: recupera (+1 punto por año cumplido hasta `HEALTH_PEAK_YEARS`) y en la
+#: vejez decae, perdiendo un punto por año a partir de ahí y un punto más
+#: cada `HEALTH_DECAY_STEP_YEARS` años (40 → −1, 60 → −2, 80 → −3, …).
+#: Así un personaje joven puede volver a subir de salud —también con las
+#: opciones positivas de `generic_events.py`— mientras la muerte por salud
+#: a `0` sigue siendo posible en la vejez. La felicidad fluctúa en ±3 cada
 #: período. Se aplica **siempre**, aunque no llegue ningún evento, y es lo
 #: que garantiza que una vida sin edad máxima pueda terminar.
 HAPPINESS_FLUCTUATION = 3
+#: Edad a partir de la cual la salud pasa de recuperarse a decaer.
+HEALTH_PEAK_YEARS = 40
+#: La pérdida anual crece un punto cada 20 años vividos por encima del pico.
 HEALTH_DECAY_STEP_YEARS = 20
+#: Recuperación anual de salud por debajo de `HEALTH_PEAK_YEARS`.
+HEALTH_YEARLY_RECOVERY = 1
 
 #: FR-005: el resumen de fin de vida agrupa el historial por `event_type`.
 #: `COTIDIANO` queda **fuera** del desglose (T062).
@@ -152,13 +162,27 @@ def natural_drift(life: Life, months: int) -> dict[str, int]:
 
     La salud sólo se toma al **cumplir años**, de modo que el riesgo anual
     es idéntico con granularidad `YEAR` y con `MONTH`: una vida mensual
-    pierde salud una sola vez cada doce avances, igual que una anual.
-    La felicidad fluctúa en todos los períodos.
+    sólo nota la deriva de salud una sola vez cada doce avances, igual que
+    una anual. Depende **sólo de la edad cumplida**, así que ambos modos
+    dan exactamente el mismo balance anualizado.
+
+    Y esa deriva es amable de joven —`+1` por año por debajo de
+    `HEALTH_PEAK_YEARS`, con lo que la salud puede subir— y netamente
+    negativa en la vejez: a partir del pico resta `1` punto el primer
+    tramo y un punto más cada `HEALTH_DECAY_STEP_YEARS` años, de modo que
+    la caída se acelera con los años y la muerte por salud a `0` sigue
+    siendo posible en la vejez. La felicidad fluctúa en todos los
+    períodos.
     """
     age_months = life.age_months + months
     health = 0
     if age_months % 12 == 0:
-        health = -(1 + (age_months // 12) // HEALTH_DECAY_STEP_YEARS)
+        age_years = age_months // 12
+        if age_years < HEALTH_PEAK_YEARS:
+            health = HEALTH_YEARLY_RECOVERY
+        else:
+            decay = (age_years - HEALTH_PEAK_YEARS) // HEALTH_DECAY_STEP_YEARS
+            health = -(1 + decay)
     return {
         "health": health,
         "happiness": random.randint(-HAPPINESS_FLUCTUATION, HAPPINESS_FLUCTUATION),
@@ -343,6 +367,7 @@ class GameService:
             event_type=event.type,
             text=event.text,
             option_id=option.id,
+            option_label=option.label,
             deltas=deltas,
             fatal=option.fatal,
             source=event.source,
@@ -408,6 +433,19 @@ class GameService:
                 for name, rows in buckets.items()
             },
         )
+
+    def get_event_history(self, *, player_id: str) -> list[LifeEvent]:
+        """Histórico de sucesos ya vividos, en orden cronológico (§2).
+
+        Sólo exige que la vida **exista** (`404` si no, igual que
+        `GET /lives`): un personaje vivo devuelve lo decidido hasta ahora y
+        uno muerto, el relato completo. Las filas salen de
+        `EVENT#<seq:06d>` con `list_events`, ordenadas por `seq` ascendente
+        por construcción; una vida sin ningún período resuelto devuelve
+        `[]`, no un error.
+        """
+        self.get_life(player_id)
+        return self._repo.list_events(player_id)
 
     def delete_life(self, *, player_id: str) -> None:
         """Borra la partida para empezar otra (FR-005, SC-004)."""

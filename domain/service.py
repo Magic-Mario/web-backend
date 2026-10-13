@@ -55,20 +55,17 @@ from persistence.lives_repo import LivesRepo
 
 from .catalog import validate_birth
 from .generic_events import generic_event
+from .errors import DomainError
+from .events import EventOption, EventSource, EventType, PresentedEvent
 from .models import (
     STAT_MIN,
     CauseOfDeath,
-    DomainError,
-    EventOption,
-    EventSource,
-    EventType,
     Gender,
     Granularity,
     Life,
     LifeEvent,
     LifeStatus,
     PersonaCercana,
-    PresentedEvent,
     Relation,
 )
 
@@ -100,15 +97,9 @@ HEALTH_DECAY_STEP_YEARS = 20
 #: Recuperación anual de salud por debajo de `HEALTH_PEAK_YEARS`.
 HEALTH_YEARLY_RECOVERY = 1
 
-#: FR-005: el resumen de fin de vida agrupa el historial por `event_type`.
-#: `COTIDIANO` queda **fuera** del desglose (T062).
-SYSTEM_BY_EVENT_TYPE: dict[EventType, str] = {
-    EventType.EDUCATIVO: "education",
-    EventType.LABORAL: "work",
-    EventType.RELACION: "relationships",
-    EventType.SENTIMENTAL: "relationships",
-}
-
+#: FR-020: el resumen de fin de vida agrupa el historial por el **sistema** que
+#: cada suceso declara (`LifeEvent.system`), no por su tipo de evento: con
+#: {MAIN, DAILY, RELATIONSHIPS} el tipo ya no distingue educación de trabajo.
 #: Los tres sistemas que el contrato exige, presentes aunque estén vacíos.
 SYSTEM_NAMES: tuple[str, ...] = ("education", "work", "relationships")
 
@@ -213,12 +204,13 @@ def _from_contract(
                 id=option.id,
                 label=option.label,
                 fatal=option.fatal,
-                deltas={delta.stat: delta.value for delta in option.deltas},
+                scores={score.stat: score.score for score in option.scores},
             )
             for option in item.options
         ],
         year=year,
         source=source,
+        system=item.system,
     )
 
 
@@ -355,7 +347,9 @@ class GameService:
             raise DomainError("CONFLICT", "no hay ningún evento pendiente")
 
         option = event.option(option_id)  # desconocida → INVALID_ARGUMENT (422)
-        deltas = life.stats.apply(option.deltas)  # SC-003: ya recortadas a 0–100
+        # El microservicio envía scores; el dominio los convierte en puntos con
+        # la curva FR-009 antes de recortar a 0–100 (SC-003).
+        deltas = life.stats.apply(option.points())
 
         life.sequence += 1
         record = LifeEvent(
@@ -368,6 +362,7 @@ class GameService:
             text=event.text,
             option_id=option.id,
             option_label=option.label,
+            system=event.system,
             deltas=deltas,
             fatal=option.fatal,
             source=event.source,
@@ -413,9 +408,10 @@ class GameService:
 
         buckets: dict[str, list[LifeEvent]] = {name: [] for name in SYSTEM_NAMES}
         for record in self._repo.list_events(player_id):
-            system = SYSTEM_BY_EVENT_TYPE.get(record.event_type)
-            if system is not None:
-                buckets[system].append(record)
+            # Un sistema desconocido o vacío no agrupa: el suceso se vivió,
+            # pero no pertenece a ninguno de los tres del contrato (FR-020).
+            if record.system in buckets:
+                buckets[record.system].append(record)
 
         return LifeSummary(
             age_reached=life.age_years,
@@ -469,6 +465,7 @@ class GameService:
                 year=life.current_year,
                 age_years=life.age_years,
                 period_index=life.period_index,
+                country=life.country,
             )
 
         life.reserve = served[1:]

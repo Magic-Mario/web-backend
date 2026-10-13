@@ -16,6 +16,9 @@
 //   - An event may declare state CONDITIONS (FR-017) and offers 2–4 options (FR-008).
 //   - A close person carries a hidden RELATIONSHIP-QUALITY gauge (FR-018); the
 //     backend sends the close-people state so the service can gate and target events.
+//   - LifeEvent carries `system` ("education" | "work" | "relationships"): the
+//     life area the event belongs to, so the end-of-life summary (002 FR-005) can
+//     be grouped without deriving it from the event type. Empty = no system.
 syntax = "proto3";
 
 package events.v2;
@@ -129,6 +132,11 @@ message LifeEvent {
   repeated EventCondition conditions = 10;
   // The close person this event is about, when it is a RELATIONSHIPS event (FR-018).
   string target_relation = 11;
+  // Life system the event belongs to — "education" | "work" | "relationships" —
+  // so the end-of-life summary (002 FR-005) is grouped by what was lived and not
+  // derived from an event type that no longer distinguishes those areas (FR-020).
+  // Empty means the event takes part in no system.
+  string system = 12;
 }
 
 message GetEventsRequest {

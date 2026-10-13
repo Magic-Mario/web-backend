@@ -2,8 +2,8 @@
 
 Cuando no llega ningún suceso de época —el microservicio no responde, no
 encuentra sucesos de esa edad o su respuesta viene vacía— el avance continúa
-con uno de estos sucesos genéricos. La partida **nunca** se bloquea y
-`AdvanceResponse.event` sigue llegando completo, como exige el contrato.
+con uno de estos sucesos genéricos. La partida **nunca** se bloquea y el
+contrato sigue llegando completo.
 
 No sustituye al microservicio (FR-003 sigue mandando en el camino normal):
 es la red de seguridad que piden los *edge cases* de la spec (*"el sistema
@@ -12,54 +12,75 @@ recurre a eventos genéricos"*). Por eso `source = SEED` y por eso sólo lleva
 las **2 opciones no mortales** de cada tipo: matar por una red de seguridad
 sería justo lo contrario.
 
-Los 5 tipos de FR-003 están representados, y **cada uno declara su rango de
-edad** como pide FR-013: un suceso genérico tampoco se presenta fuera de su
-edad (a un recién nacido no se le ofrece una oferta de trabajo).
+Los **tres tipos** de FR-003 están representados (MAIN, DAILY y
+RELATIONSHIPS), y **cada uno declara su rango de edad** como pide FR-013: un
+suceso genérico tampoco se presenta fuera de su edad (a un recién nacido no
+se le ofrece una oferta de trabajo).
+
+Las opciones declaran **scores** (−6…+6) y no puntos: el dominio los convierte
+con la curva FR-009. Los valores son deliberadamente pequeños, porque un score
+de 4 ya son 30 puntos.
 
 La salud es una **stat jugable**, no un cuentakilómetros de muerte: el
 catálogo mezcla opciones que la suben (afrontar el imprevisto con calma,
-reservar la tarde para descansar, rechazar sin culpa, quedar a dar un
-paseo) y opciones que la bajan (estrés acumulado, noches de estudio,
-exceso de trabajo, aislamiento), y las otras tres stats conservan su
-mezcla habitual de positivos y negativos.
+rechazar sin culpa, quedar a dar un paseo) y opciones que la bajan (estrés
+acumulado, noches de estudio, exceso de trabajo, aislamiento), y las otras
+tres stats conservan su mezcla habitual de positivos y negativos.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 
-from .models import EventOption, EventSource, EventType, PresentedEvent
+from .events import EventOption, EventScope, EventSource, EventType, PresentedEvent
 
-#: `id → tipo → rango de edad → enunciado → opciones`. Los ids son
+#: `id → tipo → ámbito → rango de edad → enunciado → opciones`. Los ids son
 #: estables, para poder filtrarlos con `consumed_ids` y no repetir el mismo
 #: genérico seguido. Los rangos repiten los del microservicio (FR-013).
 #:
-#: Los `deltas` de salud van **en las dos direcciones** (4 opciones que la
-#: suben y 4 que la bajan), para que cuidarse sea una decisión de juego:
-#: afrontar con calma, descansar la tarde, rechazar sin culpa o quedar a
-#: dar un paseo la recuperan; el estrés acumulado, el estudio a marchas
-#: forzadas, el exceso de trabajo y el aislamiento la consumen.
-#: `happiness`, `intelligence` y `looks` siguen con su mezcla de signos de
-#: siempre.
+#: El ámbito (FR-004/FR-005) declara de dónde vendría el material: la oferta de
+#: trabajo es el suceso del año (`YEAR`), el resto sale del perfil de la década
+#: (`DECADE`).
 _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
     {
+        "id": "generic-laboral",
+        "type": EventType.MAIN,
+        "scope": EventScope.YEAR,
+        "system": "work",
+        "min_age": 18,
+        "max_age": 120,
+        "text": "Llega de última hora una oferta de trabajo que no esperabas.",
+        "options": (
+            ("opt-1", "Presentarte sin dudarlo", {"intelligence": 2, "health": -1}),
+            (
+                "opt-2",
+                "Rechazarla y seguir como estás",
+                {"happiness": 1, "intelligence": -1, "health": 1},
+            ),
+        ),
+    },
+    {
         "id": "generic-cotidiano",
-        "type": EventType.COTIDIANO,
+        "type": EventType.DAILY,
+        "scope": EventScope.DECADE,
+        "system": "",
         "min_age": 0,
         "max_age": 120,
         "text": "Un imprevisto doméstico tuerce el plan que tenías para el día.",
         "options": (
-            ("opt-1", "Afrontarlo con calma", {"happiness": 4, "health": 1}),
+            ("opt-1", "Afrontarlo con calma", {"happiness": 2, "health": 1}),
             (
                 "opt-2",
                 "Dejarlo para mañana",
-                {"happiness": -3, "intelligence": 1, "health": -1},
+                {"happiness": -1, "intelligence": 1, "health": -1},
             ),
         ),
     },
     {
         "id": "generic-educativo",
-        "type": EventType.EDUCATIVO,
+        "type": EventType.DAILY,
+        "scope": EventScope.DECADE,
+        "system": "education",
         "min_age": 6,
         "max_age": 30,
         "text": "Se abre en tu barrio un taller formativo al que te puedes apuntar.",
@@ -67,33 +88,20 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
             (
                 "opt-1",
                 "Apuntarte y aprovecharlo",
-                {"intelligence": 6, "happiness": -1, "health": -1, "looks": -1},
+                {"intelligence": 3, "happiness": -1, "health": -1, "looks": -1},
             ),
             (
                 "opt-2",
                 "Pasarlo por alto",
-                {"happiness": 2, "intelligence": -1, "health": 1},
-            ),
-        ),
-    },
-    {
-        "id": "generic-laboral",
-        "type": EventType.LABORAL,
-        "min_age": 18,
-        "max_age": 120,
-        "text": "Llega de última hora una oferta de trabajo que no esperabas.",
-        "options": (
-            ("opt-1", "Presentarte sin dudarlo", {"intelligence": 4, "health": -2}),
-            (
-                "opt-2",
-                "Rechazarla y seguir como estás",
-                {"happiness": 3, "intelligence": -1, "health": 1},
+                {"happiness": 1, "intelligence": -1, "health": 1},
             ),
         ),
     },
     {
         "id": "generic-relacion",
-        "type": EventType.RELACION,
+        "type": EventType.RELATIONSHIPS,
+        "scope": EventScope.DECADE,
+        "system": "relationships",
         "min_age": 0,
         "max_age": 120,
         "text": (
@@ -103,26 +111,37 @@ _GENERIC_EVENTS: tuple[dict[str, object], ...] = (
         "options": (
             # Un paseo y una conversación al aire libre: la mejor fuente
             # positiva de salud del catálogo genérico.
-            ("opt-1", "Quedar para recuperar el tiempo", {"happiness": 6, "health": 2}),
-            ("opt-2", "Dejarlo estar", {"happiness": -4, "health": -1}),
+            (
+                "opt-1",
+                "Quedar para recuperar el tiempo",
+                {"happiness": 3, "health": 1},
+            ),
+            ("opt-2", "Dejarlo estar", {"happiness": -2, "health": -1}),
         ),
     },
     {
         "id": "generic-sentimental",
-        "type": EventType.SENTIMENTAL,
+        "type": EventType.RELATIONSHIPS,
+        "scope": EventScope.DECADE,
+        "system": "relationships",
         "min_age": 14,
         "max_age": 120,
         "text": "Conoces a alguien con quien la conversación fluye sin esfuerzo.",
         "options": (
-            ("opt-1", "Seguir hablando", {"happiness": 7, "looks": 1}),
-            ("opt-2", "Cortar la conversación", {"happiness": -3}),
+            ("opt-1", "Seguir hablando", {"happiness": 3, "looks": 1}),
+            ("opt-2", "Cortar la conversación", {"happiness": -2}),
         ),
     },
 )
 
 
 def generic_event(
-    consumed_ids: Iterable[str], *, year: int, age_years: int, period_index: int
+    consumed_ids: Iterable[str],
+    *,
+    year: int,
+    age_years: int,
+    period_index: int,
+    country: str,
 ) -> PresentedEvent:
     """Devuelve un suceso genérico **aún no presentado** y de su edad (FR-013).
 
@@ -130,6 +149,10 @@ def generic_event(
     ellos, primero uno que todavía no se haya presentado. Cuando ya se
     gastaron todos —vida muy larga con el microservicio caído— el ciclo se
     gira con el número de período, para no clavarse siempre en el mismo.
+
+    `country` se propaga al evento para que el alcance siga siendo verificable
+    (FR-002): la red de seguridad no puede ser la única que devuelva eventos
+    sin país.
 
     Si a esa edad no cabe **ningún** rango (un personaje de más de 120
     años, más allá del catálogo real) se amplía a los cinco: repetir un
@@ -153,9 +176,12 @@ def generic_event(
         type=spec["type"],  # type: ignore[arg-type]
         text=str(spec["text"]),
         options=[
-            EventOption(id=option_id, label=label, deltas=dict(deltas))
-            for option_id, label, deltas in spec["options"]  # type: ignore[union-attr]
+            EventOption(id=option_id, label=label, scores=dict(scores))
+            for option_id, label, scores in spec["options"]  # type: ignore[union-attr]
         ],
         year=year,
         source=EventSource.SEED,
+        country=country,
+        scope=spec["scope"],  # type: ignore[arg-type]
+        system=str(spec["system"]),
     )

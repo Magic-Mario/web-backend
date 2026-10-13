@@ -28,7 +28,8 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 from config import DYNAMODB_ENDPOINT, DYNAMODB_REGION, PROJECT
-from domain.models import DomainError, Life, LifeEvent
+from domain.errors import DomainError
+from domain.models import Life, LifeEvent
 
 #: Nombre de la tabla dueña del backend. La de eventos es `${PROJECT}-events-cache`.
 LIVES_TABLE = f"{PROJECT}-lives"

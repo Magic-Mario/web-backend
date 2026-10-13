@@ -28,18 +28,16 @@ from pydantic import BaseModel, ConfigDict
 
 from config import FRONTEND_ORIGIN, configure_logging
 from domain.catalog import birth_catalog
+from domain.errors import DomainError
+from domain.events import EventSource, EventType, PresentedEvent
 from domain.models import (
     CauseOfDeath,
-    DomainError,
-    EventSource,
-    EventType,
     Gender,
     Granularity,
     Life,
     LifeEvent,
     LifeStatus,
     PersonState,
-    PresentedEvent,
     Relation,
 )
 from domain.service import GameService, LifeSummary

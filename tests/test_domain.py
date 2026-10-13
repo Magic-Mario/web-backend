@@ -26,25 +26,22 @@ from dataclasses import replace
 import pytest
 
 from domain import service as domain_service
+from domain.errors import DomainError
+from domain.events import EventOption, EventSource, EventType, PresentedEvent
 from domain.models import (
     INITIAL_STAT,
     RANDOM_DEATH_PROBABILITY,
+    STAT_NAMES,
     CauseOfDeath,
-    DomainError,
-    EventType,
-    EventSource,
     Gender,
     Granularity,
     Life,
     LifeEvent,
     LifeStatus,
     PersonaCercana,
-    PresentedEvent,
-    EventOption,
-    Relation,
     PersonState,
+    Relation,
     Stats,
-    STAT_NAMES,
 )
 from domain.service import GameService
 
@@ -137,7 +134,7 @@ def test_dead_life_requires_a_cause_of_death() -> None:
 def test_event_option_must_belong_to_the_event() -> None:
     event = PresentedEvent(
         id="1990-x",
-        type=EventType.COTIDIANO,
+        type=EventType.DAILY,
         text="Sucede algo",
         options=[
             EventOption("opt-1", "Actuar", {"health": 5}),
@@ -146,7 +143,7 @@ def test_event_option_must_belong_to_the_event() -> None:
         year=1990,
         source=EventSource.SEED,
     )
-    assert event.option("opt-2").deltas == {"happiness": -2}
+    assert event.option("opt-2").scores == {"happiness": -2}
     with pytest.raises(DomainError) as exc:
         event.option("opt-99")
     assert exc.value.code == "INVALID_ARGUMENT"
@@ -231,7 +228,7 @@ def test_create_life_rejects_birth_year_out_of_range(birth_year: int) -> None:
 def _event(event_id: str) -> PresentedEvent:
     return PresentedEvent(
         id=event_id,
-        type=EventType.COTIDIANO,
+        type=EventType.DAILY,
         text=f"Suceso {event_id} de la época",
         options=[EventOption("opt-1", "Actuar", {"health": 5})],
         year=1995,
@@ -327,7 +324,7 @@ def test_reserve_pending_and_consumed_survive_a_reload() -> None:
     assert restored.pending_event.id == "ev-0"
     assert restored.consumed_ids == ["ev-0"]
     # Los `deltas` se quedan en el servidor, pero no se pierden (data-model §2).
-    assert restored.reserve[0].option("opt-1").deltas == {"health": 5}
+    assert restored.reserve[0].option("opt-1").scores == {"health": 5}
 
 
 def test_granularity_stays_fixed_for_the_whole_life() -> None:
@@ -430,6 +427,21 @@ def _kill_by_random(
     return player_id
 
 
+def _new_dead_life(service: GameService, born) -> str:
+    """Crea una vida y la deja `DEAD` sin escribir ninguna fila de historial.
+
+    Los tests de resumen escriben su propio historial: si la vida avanzara una
+    vez, ese suceso real entraría en `by_system` y ensuciaría las cuentas. Su
+    sistema lo declara el microservicio, no el tipo de evento (FR-020).
+    """
+    player_id = born()
+    life = service.get_life(player_id)
+    life.status = LifeStatus.DEAD
+    life.cause_of_death = CauseOfDeath.FATAL_RANDOM
+    service.repo.put_state(life)
+    return player_id
+
+
 def test_health_zero_ends_the_life(service: GameService, born) -> None:
     """FR-005: la salud a 0 mata aunque la opción elegida no sea mortal."""
     player_id = born()
@@ -528,9 +540,13 @@ def test_there_is_no_age_ceiling(
 def _write_history(
     service: GameService, player_id: str, rows: list[tuple[EventType, str]]
 ) -> None:
-    """Escribe filas `EVENT#<seq>` con la misma forma que una partida real."""
+    """Escribe filas `EVENT#<seq>` con la misma forma que una partida real.
+
+    `rows` son `(tipo, sistema, enunciado)`: el tipo sigue siendo obligatorio en
+    la fila, pero desde FR-020 el resumen agrupa por el **sistema** declarado.
+    """
     start = service.get_life(player_id).sequence
-    for offset, (event_type, text) in enumerate(rows, start=1):
+    for offset, (event_type, system, text) in enumerate(rows, start=1):
         service.repo.put_event(
             player_id,
             LifeEvent(
@@ -540,6 +556,7 @@ def _write_history(
                 year=1990 + offset,
                 event_id=f"ev-{offset:03d}",
                 event_type=event_type,
+                system=system,
                 text=text,
                 option_id="opt-1",
                 deltas={},
@@ -550,26 +567,26 @@ def _write_history(
 
 
 def test_the_summary_groups_the_history_by_system(
-    service: GameService, born, monkeypatch
+    service: GameService, born
 ) -> None:
-    """FR-005 / T062: agrupar por `event_type`; `COTIDIANO` queda fuera."""
-    player_id = _kill_by_random(service, born, monkeypatch)
+    """FR-020: agrupar por el `system` que declara cada suceso; sin sistema, fuera."""
+    player_id = _new_dead_life(service, born)
     _write_history(
         service,
         player_id,
         [
-            (EventType.COTIDIANO, "Un día cualquiera"),
-            (EventType.EDUCATIVO, "Terminaste la primaria"),
-            (EventType.EDUCATIVO, "Terminaste la universidad"),
-            (EventType.LABORAL, "Tu primer empleo"),
-            (EventType.RELACION, "Conociste a un amigo"),
-            (EventType.SENTIMENTAL, "Conociste a tu pareja"),
+            (EventType.DAILY, "", "Un día cualquiera"),
+            (EventType.DAILY, "education", "Terminaste la primaria"),
+            (EventType.DAILY, "education", "Terminaste la universidad"),
+            (EventType.MAIN, "work", "Tu primer empleo"),
+            (EventType.RELATIONSHIPS, "relationships", "Conociste a un amigo"),
+            (EventType.RELATIONSHIPS, "relationships", "Conociste a tu pareja"),
         ],
     )
 
     summary = service.get_summary(player_id=player_id)
 
-    assert summary.age_reached == 1
+    assert summary.age_reached == 0
     assert summary.cause_of_death is CauseOfDeath.FATAL_RANDOM
     assert set(summary.by_system) == {"education", "work", "relationships"}
 
@@ -582,25 +599,23 @@ def test_the_summary_groups_the_history_by_system(
     ]
 
     assert (summary.by_system["work"].events) == 1
-    # RELACIÓN y SENTIMENTAL comparten sistema.
+    # Los dos sucesos de RELATIONSHIPS comparten sistema.
     assert (summary.by_system["relationships"].events) == 2
     assert summary.by_system["relationships"].highlights == [
         "Conociste a tu pareja",
         "Conociste a un amigo",
     ]
-    # COTIDIANO no cuenta en ningún sistema: sólo salen los tres del contrato.
+    # El suceso sin sistema no cuenta: sólo salen los tres del contrato.
     assert sum(digest.events for digest in summary.by_system.values()) == 5
 
 
-def test_the_summary_highlights_stop_at_five(
-    service: GameService, born, monkeypatch
-) -> None:
+def test_the_summary_highlights_stop_at_five(service: GameService, born) -> None:
     """`SystemDigest.highlights` declara `maxItems: 5` en el contrato."""
-    player_id = _kill_by_random(service, born, monkeypatch)
+    player_id = _new_dead_life(service, born)
     _write_history(
         service,
         player_id,
-        [(EventType.EDUCATIVO, f"Etapa {index}") for index in range(7)],
+        [(EventType.DAILY, "education", f"Etapa {index}") for index in range(7)],
     )
 
     digest = service.get_summary(player_id=player_id).by_system["education"]

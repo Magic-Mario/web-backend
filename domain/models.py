@@ -1,11 +1,16 @@
-"""Entidades y errores del dominio del juego de simulación de vida.
+"""Entidades de vida del dominio de simulación (FR-001…FR-014).
 
 Sin dependencias de framework: el mismo dominio lo consumen el adaptador REST
-(FastAPI, desplegado), el repositorio de persistencia en DynamoDB y las
-pruebas de dominio.
+(FastAPI, desplegado), el repositorio de persistencia en DynamoDB y las pruebas
+de dominio.
+
+El vocabulario de eventos vive en `events.py` y el error compartido en
+`errors.py`; este módulo solo describe la **vida**: nacimiento, stats, personas
+cercanas e historial.
 
 Fuentes: `specs/002-simulacion-vida/spec.md` (FR-001…FR-014) y
-`specs/002-simulacion-vida/data-model.md` (§1 `Life`, §2 `LifeEvent`).
+`specs/003-mecanicas-de-juego/spec.md` (FR-010 nacimiento, FR-014/FR-018
+personas cercanas).
 
 Las cuatro stats son las **únicas** de v1 (FR-004): sin dinero, habilidades
 ni energía.
@@ -18,10 +23,18 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping
 
+from .errors import DomainError
+from .events import EventSource, EventType, PresentedEvent
+
 # Escala de stats (FR-004) y valor de nacimiento (FR-010).
 STAT_MIN = 0
 STAT_MAX = 100
 INITIAL_STAT = 50
+
+#: Escala de la gauge oculta de relación por persona cercana (FR-018, D5).
+RELATIONSHIP_MIN = 0
+RELATIONSHIP_MAX = 100
+DEFAULT_RELATIONSHIP = 70
 
 #: Nombre de las cuatro stats, en el orden en que se muestran en la UI.
 STAT_NAMES: tuple[str, ...] = ("health", "happiness", "intelligence", "looks")
@@ -56,23 +69,6 @@ class CauseOfDeath(str, Enum):
     FATAL_RANDOM = "FATAL_RANDOM"
 
 
-class EventType(str, Enum):
-    """FR-003: los cinco tipos de evento que el microservicio debe cubrir."""
-
-    COTIDIANO = "COTIDIANO"
-    EDUCATIVO = "EDUCATIVO"
-    LABORAL = "LABORAL"
-    RELACION = "RELACION"
-    SENTIMENTAL = "SENTIMENTAL"
-
-
-class EventSource(str, Enum):
-    """FR-003a y edge cases: `SEED` cuando falló la búsqueda externa."""
-
-    WIKIPEDIA = "WIKIPEDIA"
-    SEED = "SEED"
-
-
 class Relation(str, Enum):
     """FR-014: tipo de vínculo de una persona cercana."""
 
@@ -84,34 +80,27 @@ class Relation(str, Enum):
 
 
 class PersonState(str, Enum):
-    """FR-014: `TOGETHER`/`SEPARATED` solo tienen sentido para `PARTNER`."""
+    """FR-014/FR-018: `TOGETHER`/`SEPARATED` solo tienen sentido para `PARTNER`.
+
+    `ESTRANDED` (FR-018, D5) es el final de un hermano o un amigo: la relación
+    se rompe, pero la persona sigue viva y en el perfil.
+    """
 
     ALIVE = "ALIVE"
     DEAD = "DEAD"
     TOGETHER = "TOGETHER"
     SEPARATED = "SEPARATED"
+    ESTRANGED = "ESTRANGED"
 
 
 #: FR-005: probabilidad de muerte aleatoria POR PERÍODO según granularidad.
 #: 1% anual y 0,08% mensual → ~11,4% anualizado en ambos modos (mismo riesgo
-#: en los dos modos de juego).
+#: en los dos modos de juego). Con D6 el sorteo es reproducible (FR-019), pero
+#: la probabilidad no cambia.
 RANDOM_DEATH_PROBABILITY: dict[Granularity, float] = {
     Granularity.YEAR: 0.01,
     Granularity.MONTH: 0.0008,
 }
-
-
-class DomainError(Exception):
-    """Error de dominio con un `code` mapeable a un estado HTTP.
-
-    `rest/app.py` traduce `NOT_FOUND`→404, `CONFLICT`→409 e
-    `INVALID_ARGUMENT`→422, que son exactamente los códigos del contrato.
-    """
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
 
 
 def now_utc_rfc3339() -> str:
@@ -121,6 +110,10 @@ def now_utc_rfc3339() -> str:
 
 def _clamp(value: int) -> int:
     return max(STAT_MIN, min(STAT_MAX, int(value)))
+
+
+def _clamp_relationship(value: int) -> int:
+    return max(RELATIONSHIP_MIN, min(RELATIONSHIP_MAX, int(value)))
 
 
 @dataclass
@@ -141,7 +134,7 @@ class Stats:
             setattr(self, name, _clamp(getattr(self, name)))
 
     def apply(self, deltas: Mapping[str, int]) -> dict[str, int]:
-        """Aplica los `deltas` de una opción recortando a `0 ≤ x ≤ 100`.
+        """Aplica los `deltas` (puntos) de una opción recortando a `0 ≤ x ≤ 100`.
 
         Devuelve los deltas tal cual se pidieron: es lo que el contrato
         devuelve en `DecisionResponse.deltas` y lo que se registra en el
@@ -170,17 +163,23 @@ class Stats:
 
 @dataclass
 class PersonaCercana:
-    """FR-014: persona vinculada visible en el perfil (nombre, relación, estado).
+    """FR-014/FR-018: persona vinculada visible en el perfil.
 
     Los padres existen desde la creación; hermanos, amigos y pareja llegan
-    por eventos de tipo relación.
+    por eventos de tipo relación. `relationship` es la gauge oculta 0–100
+    (FR-018, D5): no viaja en las decisiones, se muestra en el perfil.
     """
 
     name: str
     relation: Relation
     state: PersonState = PersonState.ALIVE
+    relationship: int = DEFAULT_RELATIONSHIP
 
     def __post_init__(self) -> None:
+        if isinstance(self.relation, str):
+            self.relation = Relation(self.relation)
+        if isinstance(self.state, str):
+            self.state = PersonState(self.state)
         if not self.name or not self.name.strip():
             raise DomainError("INVALID_ARGUMENT", "el nombre no puede estar vacío")
         if self.state in (PersonState.TOGETHER, PersonState.SEPARATED):
@@ -189,12 +188,14 @@ class PersonaCercana:
                     "INVALID_ARGUMENT",
                     f"TOGETHER/SEPARATED solo aplica a PARTNER, no a {self.relation.value}",
                 )
+        self.relationship = _clamp_relationship(self.relationship)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "relation": self.relation.value,
             "state": self.state.value,
+            "relationship": self.relationship,
         }
 
     @classmethod
@@ -203,90 +204,8 @@ class PersonaCercana:
             name=data["name"],
             relation=Relation(data["relation"]),
             state=PersonState(data["state"]),
-        )
-
-
-@dataclass(frozen=True)
-class EventOption:
-    """Opción de decisión de un evento.
-
-    `deltas` **no** viajan al navegador: se quedan en el servidor dentro del
-    evento pendiente hasta que el jugador decide. `fatal` sí viaja, porque el
-    contrato lo declara y FR-005a exige que la interfaz lo ponga de
-    manifiesto.
-    """
-
-    id: str
-    label: str
-    deltas: dict[str, int] = field(default_factory=dict)
-    fatal: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "label": self.label,
-            "deltas": dict(self.deltas),
-            "fatal": self.fatal,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "EventOption":
-        return cls(
-            id=data["id"],
-            label=data["label"],
-            deltas={k: int(v) for k, v in (data.get("deltas") or {}).items()},
-            fatal=bool(data.get("fatal", False)),
-        )
-
-
-@dataclass(frozen=True)
-class PresentedEvent:
-    """Evento servido por el microservicio y todavía sin resolver (FR-003).
-
-    Vive dentro de `Life.reserve` (devuelto y aún no presentado) o en
-    `Life.pending_event` (el que el jugador está viendo ahora mismo).
-    """
-
-    id: str
-    type: EventType
-    text: str
-    options: list[EventOption] = field(default_factory=list)
-    year: int | None = None
-    source: EventSource = EventSource.SEED
-
-    def __post_init__(self) -> None:
-        if not self.id:
-            raise DomainError("INVALID_ARGUMENT", "el evento necesita un id")
-        if not self.text:
-            raise DomainError("INVALID_ARGUMENT", "el evento necesita un enunciado")
-
-    def option(self, option_id: str) -> EventOption:
-        for option in self.options:
-            if option.id == option_id:
-                return option
-        raise DomainError(
-            "INVALID_ARGUMENT", f"la opción {option_id!r} no pertenece a este evento"
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "type": self.type.value,
-            "text": self.text,
-            "options": [option.to_dict() for option in self.options],
-            "year": self.year,
-            "source": self.source.value,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "PresentedEvent":
-        return cls(
-            id=data["id"],
-            type=EventType(data["type"]),
-            text=data["text"],
-            options=[EventOption.from_dict(o) for o in (data.get("options") or [])],
-            year=data.get("year"),
-            source=EventSource(data.get("source", EventSource.SEED.value)),
+            # Filas escritas antes de la gauge: defecto seguro, nunca un error.
+            relationship=int(data.get("relationship", DEFAULT_RELATIONSHIP)),
         )
 
 
@@ -297,7 +216,8 @@ class LifeEvent:
 
     El orden lexicográfico de `SK` es el orden cronológico. El resumen de
     fin de vida se calcula agrupando `event_type` sobre estas filas, sin
-    guardar estadísticas derivadas.
+    guardar estadísticas derivadas. `deltas` son los **puntos aplicados**, ya
+    convertidos desde los scores de la opción por la curva FR-009.
     """
 
     seq: int
@@ -316,6 +236,10 @@ class LifeEvent:
     #: leen con `""` (`from_dict`), y `GET /lives/events` sustituye ese
     #: vacío por el propio `option_label`/`option_id`.
     option_label: str = ""
+    #: Sistema de vida del suceso (FR-020), copiado del evento servido, que es
+    #: lo que agrupa el resumen de fin de vida. `""` = no participa en ninguno.
+    #: **Aditivo**: las filas escritas antes de este campo se leen con `""`.
+    system: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -328,6 +252,7 @@ class LifeEvent:
             "text": self.text,
             "option_id": self.option_id,
             "option_label": self.option_label,
+            "system": self.system,
             "deltas": dict(self.deltas),
             "fatal": self.fatal,
             "source": self.source.value,
@@ -346,6 +271,7 @@ class LifeEvent:
             option_id=data["option_id"],
             # Filas escritas sin la etiqueta: defecto seguro, nunca un error.
             option_label=str(data.get("option_label") or ""),
+            system=str(data.get("system") or ""),
             deltas={k: int(v) for k, v in (data.get("deltas") or {}).items()},
             fatal=bool(data.get("fatal", False)),
             source=EventSource(data["source"]),
@@ -411,6 +337,11 @@ class Life:
         if self.granularity is Granularity.YEAR:
             return self.age_years
         return self.age_months
+
+    @property
+    def decade(self) -> int:
+        """Década del año en curso, derivada (FR-005), p. ej. 1991 → 1990."""
+        return (self.current_year // 10) * 10
 
     @property
     def random_death_probability(self) -> float:

@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .models import DomainError
+from .errors import DomainError
 
 _CATALOG_PATH = Path(__file__).with_name("birth_catalog.json")
 

@@ -10,10 +10,10 @@ Dos apuntes sobre cómo se llega a cada estado:
   por otra que siempre sale mortal (`0.0 ≤ 0,01`, FR-005). Con un 1 % real
   la prueba sería una moneda al aire; el resto de la suite convive con la
   ruleta no mortal de `tests/conftest.py`.
-- **25 rondas no es un número al azar.** Con el catálogo de referencia,
-  `LABORAL` sólo empieza a salir a partir de los 18 años y el quinto lote
-  (`limit = 5`) llega en el avance 21: a las 25 rondas el historial ya
-  tiene eventos de los tres sistemas agrupados.
+- **25 rondas no es un número al azar.** Con el catálogo de referencia, los
+  sucesos del año (`MAIN`, sistema `work`) sólo empiezan a salir a partir de
+  los 18 años y el quinto lote (`limit = 5`) llega en el avance 21: a las 25
+  rondas el historial ya tiene eventos de los tres sistemas agrupados (FR-020).
 """
 
 from __future__ import annotations
@@ -99,9 +99,9 @@ def test_the_summary_after_death_reports_age_cause_and_systems(
         assert digest["events"] == digest["decisions"], name
         assert 0 < len(digest["highlights"]) <= 5, name
 
-    assert systems["education"]["events"] >= 1, "faltan eventos EDUCATIVO"
-    assert systems["work"]["events"] >= 1, "faltan eventos LABORAL"
-    assert systems["relationships"]["events"] >= 1, "faltan RELACIÓN/SENTIMENTAL"
+    assert systems["education"]["events"] >= 1, "faltan sucesos del sistema education"
+    assert systems["work"]["events"] >= 1, "faltan sucesos del sistema work"
+    assert systems["relationships"]["events"] >= 1, "faltan sucesos de relationships"
 
 
 # --- una vida muerta sólo admite resumen y borrado -------------------------

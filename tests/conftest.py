@@ -42,44 +42,46 @@ from domain import service as _domain_service
 from domain.service import GameService
 from persistence.lives_repo import LivesRepo
 
-#: (tipo, edad mínima, edad máxima) de la referencia: cubre los 5 tipos de
-#: FR-003 y deja descartados por edad los que no tocan (FR-013).
+#: (tipo, sistema, edad mínima, edad máxima) de la referencia: cubre los 3
+#: tipos de FR-003, los 3 sistemas del resumen (FR-020) y deja descartados por
+#: edad los que no tocan (FR-013).
 _EVENT_SHAPES = (
-    (events_pb2.COTIDIANO, 0, 120),
-    (events_pb2.EDUCATIVO, 6, 30),
-    (events_pb2.LABORAL, 18, 120),
-    (events_pb2.RELACION, 0, 120),
-    (events_pb2.SENTIMENTAL, 14, 120),
+    (events_pb2.MAIN, "work", 18, 120),
+    (events_pb2.DAILY, "education", 0, 120),
+    (events_pb2.RELATIONSHIPS, "relationships", 0, 120),
 )
 
-#: Dos opciones con `deltas` distintos y ninguna mortal: el gate decide con
+#: Dos opciones con `scores` distintos y ninguna mortal: el gate decide con
 #: `opt-1` y después avanza otra vez, así que ese evento no puede matar.
+#: Los scores son pequeños porque un score de 4 ya son 30 puntos (FR-009).
 _OPTIONS = (
-    ("opt-1", "Tomártelo con calma", {"happiness": 5, "health": -2}),
-    ("opt-2", "Ignorarlo y seguir con el día", {"happiness": -4, "intelligence": 1}),
+    ("opt-1", "Tomártelo con calma", {"happiness": 2, "health": -1}),
+    ("opt-2", "Ignorarlo y seguir con el día", {"happiness": -2, "intelligence": 1}),
 )
 
 #: Tamaño del catálogo de referencia. Con granularidad `YEAR` hace falta
 #: material para 20 avances seguidos (SC-005) empezando a la edad 0, donde
-#: sólo `COTIDIANO` y `RELACION` entran por edad.
+#: sólo `DAILY` y `RELATIONSHIPS` entran por edad.
 _CATALOG_SIZE = 100
 
 
 def _build_catalog() -> list[events_pb2.LifeEvent]:
     catalog: list[events_pb2.LifeEvent] = []
     for index in range(_CATALOG_SIZE):
-        event_type, min_age, max_age = _EVENT_SHAPES[index % len(_EVENT_SHAPES)]
+        event_type, system, min_age, max_age = _EVENT_SHAPES[
+            index % len(_EVENT_SHAPES)
+        ]
         options = [
             events_pb2.EventOption(
                 id=option_id,
                 label=label,
                 fatal=False,
-                deltas=[
-                    events_pb2.StatDelta(stat=stat, value=value)
-                    for stat, value in deltas.items()
+                scores=[
+                    events_pb2.StatScore(stat=stat, score=score)
+                    for stat, score in scores.items()
                 ],
             )
-            for option_id, label, deltas in _OPTIONS
+            for option_id, label, scores in _OPTIONS
         ]
         catalog.append(
             events_pb2.LifeEvent(
@@ -89,6 +91,7 @@ def _build_catalog() -> list[events_pb2.LifeEvent]:
                 min_age=min_age,
                 max_age=max_age,
                 source_url="https://example.test/reference",
+                system=system,
                 options=options,
             )
         )
@@ -96,7 +99,7 @@ def _build_catalog() -> list[events_pb2.LifeEvent]:
 
 
 class ReferenceEventsServicer(events_pb2_grpc.EventsServiceServicer):
-    """`events.v1` de referencia: catálogo fijo y registro de peticiones.
+    """`events.v2` de referencia: catálogo fijo y registro de peticiones.
 
     Sólo se guarda lo que el backend **pide** (`limit`, `exclude_ids`, edad),
     que es lo que las pruebas de US2 tienen que verificar (FR-003a, SC-005).
@@ -119,8 +122,16 @@ class ReferenceEventsServicer(events_pb2_grpc.EventsServiceServicer):
             if event.id not in excluded
             and event.min_age <= request.age_years <= event.max_age
         ][: request.limit]
+        # FR-002: cada evento servido pertenece al país pedido. Se devuelve una
+        # copia para no mutar el catálogo estático.
+        scoped: list[events_pb2.LifeEvent] = []
+        for event in served:
+            copy = events_pb2.LifeEvent()
+            copy.CopyFrom(event)
+            copy.country = request.country
+            scoped.append(copy)
         return events_pb2.GetEventsResponse(
-            events=served,
+            events=scoped,
             origin=events_pb2.FETCHED,
             year=request.year,
         )

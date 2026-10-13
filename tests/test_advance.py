@@ -25,7 +25,9 @@ from typing import Callable
 
 import pytest
 
-from domain.models import STAT_NAMES, DomainError, EventSource, PresentedEvent
+from domain.errors import DomainError
+from domain.events import EventSource, PresentedEvent
+from domain.models import STAT_NAMES
 from domain.service import GameService
 from grpc_client.events import EventsClient
 from persistence.lives_repo import LivesRepo
@@ -119,7 +121,8 @@ def test_the_drift_is_reported_apart_and_the_decision_sits_on_top_of_it(
 
     # La decisión pesa POR ENCIMA de la deriva (FR-011).
     decision = _decide(service, player_id)
-    assert decision.deltas["happiness"] == 5
+    # `opt-1` declara happiness +2, y la curva FR-009 lo convierte en +8 puntos.
+    assert decision.deltas["happiness"] == 8
     after = service.get_life(player_id)
     assert (
         after.stats.happiness
@@ -128,7 +131,7 @@ def test_the_drift_is_reported_apart_and_the_decision_sits_on_top_of_it(
     assert after.stats.health == outcome.life.stats.health + decision.deltas["health"]
 
 
-def test_no_offered_option_is_left_without_deltas(
+def test_no_offered_option_is_left_without_scores(
     service: GameService, born: Callable[..., str]
 ) -> None:
     """SC-003: 100 % de las decisiones con cambio observable."""
@@ -137,8 +140,8 @@ def test_no_offered_option_is_left_without_deltas(
 
     assert len(event.options) >= 2
     for option in event.options:
-        assert option.deltas, f"{option.id} no cambia ninguna stat"
-        assert set(option.deltas) <= set(STAT_NAMES)
+        assert option.scores, f"{option.id} no cambia ninguna stat"
+        assert set(option.scores) <= set(STAT_NAMES)
 
 
 # --- límite por período y cola de reserva (FR-003a, Decisión 5) -----------
@@ -247,7 +250,7 @@ def test_a_generic_option_can_raise_health(born: Callable[..., str]) -> None:
     positive = next(
         option
         for option in outcome.event.options
-        if option.deltas.get("health", 0) > 0
+        if option.scores.get("health", 0) > 0
     )
     decision = unreachable.submit_decision(
         player_id=player_id, option_id=positive.id

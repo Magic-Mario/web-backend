@@ -15,7 +15,8 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from domain.models import EventSource, EventType, LifeEvent
+from domain.events import EventSource, EventType
+from domain.models import LifeEvent
 from rest.app import create_app
 
 #: Las claves exactas que el contrato declara en cada evento del histórico.
@@ -119,19 +120,21 @@ def test_the_endpoint_returns_the_exact_shape_in_chronological_order() -> None:
     assert set(first) == ITEM_KEYS
     assert first["period_index"] == 1
     assert (first["age_months"], first["age_years"]) == (12, 1)
-    assert first["event_id"] == "ev-000"
-    assert first["type"] == "COTIDIANO"
+    assert first["event_id"] == "ev-001"
+    assert first["type"] == "DAILY"
     assert first["text"]
     assert first["option_id"] == "opt-1"
     assert first["option_label"] == "Tomártelo con calma"
-    assert first["deltas"] == {"happiness": 5, "health": -2}
+    # `opt-1` declara happiness +2 / health −1 y la curva FR-009 los convierte
+    # en +8 / −4 puntos antes de recortar a 0–100.
+    assert first["deltas"] == {"happiness": 8, "health": -4}
     assert first["fatal"] is False
     assert first["source"] == "WIKIPEDIA"
 
     assert (second["seq"], second["period_index"]) == (2, 2)
     assert (second["age_months"], second["age_years"]) == (24, 2)
-    assert second["event_id"] == "ev-003"
-    assert second["type"] == "RELACION"
+    assert second["event_id"] == "ev-002"
+    assert second["type"] == "RELATIONSHIPS"
     assert second["source"] == "WIKIPEDIA"
 
     # El mismo contenido, también bajo el prefijo del ALB.
@@ -148,7 +151,7 @@ def test_rows_written_without_a_label_still_answer() -> None:
         age_months=12,
         year=1991,
         event_id="generic-cotidiano",
-        event_type=EventType.COTIDIANO,
+        event_type=EventType.DAILY,
         text="Un imprevisto doméstico tuerce el plan.",
         option_id="opt-1",
         deltas={"happiness": 4},

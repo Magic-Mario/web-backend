@@ -7,8 +7,8 @@
 #
 # El repo es el dueño de sus contratos (Decisión 13 de la 001), así que cada
 # repo genera su propio stub desde SU copia del .proto:
-#   cloud-project-backend -> stub de CLIENTE de events.v1
-#   web-events-service    -> stub de SERVIDOR de events.v1
+#   cloud-project-backend -> stub de CLIENTE de events.v2
+#   web-events-service    -> stub de SERVIDOR de events.v2
 #
 # ⚠️ Corregido 2026-10-06: el `PROTO_DIR` anterior era `$BACKEND_DIR/../proto`,
 # restos del layout monorepo `apps/backend/`; con el split de repos hay que

@@ -1,98 +1,162 @@
-// Contrato gRPC interno del microservicio de eventos.
-// Versionado por paquete: events.v1. Cambios incompatibles crean events.v2.
+// Internal gRPC contract of the events microservice — TARGET SHAPE (events.v2).
+// Versioned by package: events.v2. Incompatible changes create events.v3.
 //
-// Propiedad del microservicio de eventos. El backend es el CLIENTE y el
-// microservicio el SERVIDOR (principio III: comunicación interna este-oeste
-// por gRPC sobre contrato .proto versionado).
+// Owned by the events microservice. The backend is the CLIENT and the service
+// the SERVER (principle III: internal east-west gRPC over a versioned .proto).
 //
-// Gate de la constitución 1.3.0: este contrato MUST estar definido y con
-// prueba de contrato ANTES de desplegar el adaptador (ver
-// tests/test_grpc_contract.py).
+// Delta vs events.v1 (feature 002):
+//   - EventType is now { MAIN, DAILY, RELATIONSHIPS } (educational/job/sentimental
+//     removed; sentimental folded into RELATIONSHIPS) — FR-003.
+//   - LifeEvent carries `country` (scoping proof, FR-002) and `scope` (FR-004/5).
+//   - GetEvents returns a BATCH (one DAILY + one RELATIONSHIPS + the year's MAIN) — FR-007.
+//   - GetEventsRequest drops nothing but documents `country` as mandatory for scoping
+//     and adds an optional `decade`.
+//   - EventOption now carries per-stat SCORES (−6…+6) instead of final deltas; the
+//     backend converts scores into applied points (impact curve) — FR-008/FR-009.
+//   - An event may declare state CONDITIONS (FR-017) and offers 2–4 options (FR-008).
+//   - A close person carries a hidden RELATIONSHIP-QUALITY gauge (FR-018); the
+//     backend sends the close-people state so the service can gate and target events.
 syntax = "proto3";
 
-package events.v1;
+package events.v2;
 
-option go_package = "cloud-project-backend/proto/eventsv1;eventsv1";
+option go_package = "cloud-project-backend/proto/eventsv2;eventsv2";
 
-// EventsService devuelve eventos jugables derivados de sucesos reales de la
-// época en la que se encuentra el personaje (FR-003, FR-007).
 service EventsService {
-  // Devuelve hasta `limit` eventos, filtrados por edad y sin repetir los de
-  // `exclude_ids`. Nunca devuelve menos por falta de red: si la fuente externa
-  // falla, responde con el catálogo semilla (edge cases de la spec).
+  // Returns the period's batch of events, country-scoped and age-filtered,
+  // without repeating `exclude_ids`. Never returns fewer because of a source
+  // failure: it falls back to the seed catalog (spec edge cases).
   rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
 }
 
 enum EventType {
   EVENT_TYPE_UNSPECIFIED = 0;
-  COTIDIANO = 1;
-  EDUCATIVO = 2;
-  LABORAL = 3;
-  RELACION = 4;
-  SENTIMENTAL = 5;
+  MAIN = 1;            // the standout event of the character's year (FR-004)
+  DAILY = 2;           // everyday life from the decade profile (FR-005)
+  RELATIONSHIPS = 3;   // couple/family/affection from the decade profile (FR-005)
 }
 
-// Origen del contenido servido. Permite verificar FR-003a y SC-010.
+// Origin of the served content — lets the backend verify caching/fallback.
 enum EventOrigin {
   EVENT_ORIGIN_UNSPECIFIED = 0;
-  // Contenido persistido en la caché del microservicio (búsqueda hecha una
-  // sola vez para este año).
-  CACHED = 1;
-  // Búsqueda fresca realizada en esta misma llamada (primera del año).
-  FETCHED = 2;
-  // Catálogo semilla embebido: la fuente externa falló o no devolvió nada.
-  SEED = 3;
+  CACHED = 1;  // served from the service's own store (one lookup per scope+country)
+  FETCHED = 2; // fresh lookup performed in this call
+  SEED = 3;    // embedded fallback: the source failed or returned nothing
 }
 
-// Un cambio sobre una de las cuatro stats básicas (FR-004).
-message StatDelta {
-  // health | happiness | intelligence | looks
+// Scope the material was drawn from — the granularity split of FR-004/FR-005.
+enum EventScope {
+  EVENT_SCOPE_UNSPECIFIED = 0;
+  YEAR = 1;    // Main
+  DECADE = 2;  // Daily / Relationships
+}
+
+// A per-stat IMPACT SCORE (−6…+6) declared by an option. The service sends scores,
+// never points: the backend domain converts a score into applied points through the
+// impact curve (FR-009).
+message StatScore {
   string stat = 1;
-  int32 value = 2;
+  int32 score = 2; // −6..+6 (FR-008/FR-009)
 }
 
+// Optional deterministic skew applied to an option's scores before conversion (FR-009).
+enum ImpactSkew {
+  IMPACT_SKEW_UNSPECIFIED = 0; // treated as NEUTRAL
+  POSITIVE = 1;                // shifts the scores up by +1
+  NEUTRAL = 2;                 // no shift (default)
+  NEGATIVE = 3;                // shifts the scores down by −1
+}
+
+// Optional effect of a RELATIONSHIPS option on a close person (FR-009).
+enum PeopleEffect {
+  PEOPLE_EFFECT_UNSPECIFIED = 0;
+  ADD = 1;
+  ALTER = 2;
+  END = 3;
+}
+
+// Kind of state predicate that gates an event (FR-017). All of an event's
+// conditions are ANDed.
+enum ConditionKind {
+  CONDITION_KIND_UNSPECIFIED = 0;
+  GENDER = 1;          // value: MALE | FEMALE
+  PARENTS_ALIVE = 2;   // value: "true" | "false"
+  HAS_PARTNER = 3;     // value: "true" | "false"
+  CLOSE_RELATION = 4;  // value: FATHER | MOTHER | SIBLING | FRIEND | PARTNER
+  RELATIONSHIP_BELOW = 5; // value: a 0–100 threshold (targeted person's quality < value)
+  RELATIONSHIP_ABOVE = 6; // value: a 0–100 threshold (targeted person's quality > value)
+}
+
+// A state predicate an event requires to be eligible (FR-017).
+message EventCondition {
+  ConditionKind kind = 1;
+  string value = 2;
+}
+
+// The state of one close person, sent by the backend so the service can gate
+// events (FR-017) and target the one they are about (FR-018).
+message ClosePersonState {
+  string relation = 1;   // FATHER | MOTHER | SIBLING | FRIEND | PARTNER
+  int32 relationship = 2; // hidden 0–100 quality (FR-018)
+}
+
+// An option derived from the specific event (FR-008): its label reacts to the
+// event's subject, not a generic per-type template. An event offers 2–4 of them.
 message EventOption {
   string id = 1;
   string label = 2;
-  // true si elegir esta opción mata al personaje (FR-005, vía a).
-  bool fatal = 3;
-  repeated StatDelta deltas = 4;
+  bool fatal = 3; // choosing it kills the character (002 FR-005, path a)
+  repeated StatScore scores = 4; // per-stat impact scores, −6..+6 (FR-008/FR-009)
+  PeopleEffect people_effect = 5;
+  ImpactSkew impact_skew = 6;    // optional, default NEUTRAL (FR-009)
+  int32 relationship_score = 7;  // −6..+6 on the targeted person's quality (FR-018)
 }
 
 message LifeEvent {
-  // Estable entre consultas: hash de year + sección + texto.
+  // Stable across calls: hash of (scope, country, kind, subject) — FR-013.
   string id = 1;
   EventType type = 2;
-  // Enunciado ya redactado en español (la interfaz es en español).
+  // Statement already written in Spanish (the UI is in Spanish).
   string text = 3;
-  // Rango de edad propio del evento (FR-013). El servicio filtra por él.
   int32 min_age = 4;
   int32 max_age = 5;
-  // Procedencia del suceso, para trazabilidad y depuración.
   string source_url = 6;
-  repeated EventOption options = 7;
+  // Country the event belongs to; the backend can assert scoping (FR-002).
+  string country = 7;
+  EventScope scope = 8;
+  repeated EventOption options = 9;
+  // State predicates the event requires; ANDed — the backend re-checks them (FR-017).
+  repeated EventCondition conditions = 10;
+  // The close person this event is about, when it is a RELATIONSHIPS event (FR-018).
+  string target_relation = 11;
 }
 
 message GetEventsRequest {
-  // Año de vida en curso: es el parámetro con el que se localiza la época
-  // (FR-003, FR-007). Corresponde a birth_year + edad.
+  // Year of life in progress: locates the epoch (birth_year + age) — FR-004.
   int32 year = 1;
-  // Edad actual en años cumplidos; se usa para aplicar min_age/max_age.
+  // Current age in whole years; applies min_age/max_age — FR-010.
   int32 age_years = 2;
-  // Datos de nacimiento que condicionan la simulación (FR-007).
-  string gender = 3;
-  string country = 4;
-  string city = 5;
-  // Máximo devuelto: 2 con granularidad mensual, 5 con anual (FR-003a).
-  // El servicio NUNCA devuelve más que esto.
+  // Country the character lives in; MANDATORY for scoping — FR-002.
+  string country = 3;
+  string city = 4;
+  string gender = 5;
+  // Maximum returned: 3 per period (Daily + Relationships + Main) — FR-007.
   int32 limit = 6;
-  // Ids ya consumidos por esta vida; no deben volver a aparecer (SC-005).
+  // Ids already consumed by this life; must not reappear — FR-013.
   repeated string exclude_ids = 7;
+  // Optional; derived from `year` when 0 (e.g. 1991 → 1990).
+  int32 decade = 8;
+  // Character condition inputs (FR-017); the backend is their source of truth.
+  bool parents_alive = 9;          // at least one parent alive
+  bool has_partner = 10;           // a PARTNER with state TOGETHER
+  repeated ClosePersonState close_people = 11; // one per existing close person (FR-018)
 }
 
 message GetEventsResponse {
+  // The batch: DAILY, RELATIONSHIPS and the year's MAIN (FR-007).
   repeated LifeEvent events = 1;
   EventOrigin origin = 2;
-  // Eco del año servido, para que el backend registre el historial (FR-008).
+  // Echo of the year served, for the life history (002 FR-008).
   int32 year = 3;
+  int32 decade = 4;
 }

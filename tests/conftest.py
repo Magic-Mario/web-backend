@@ -108,6 +108,9 @@ class ReferenceEventsServicer(events_pb2_grpc.EventsServiceServicer):
     def __init__(self) -> None:
         self.requests: list[events_pb2.GetEventsRequest] = []
         self.catalog = _build_catalog()
+        #: Sucesos que se sirven **antes** que el catálogo, tal cual vengan.
+        #: Sirve para simular un servicio **no conforme** (FR-002, T018).
+        self.prepended: list[events_pb2.LifeEvent] = []
 
     def GetEvents(
         self,
@@ -116,19 +119,22 @@ class ReferenceEventsServicer(events_pb2_grpc.EventsServiceServicer):
     ) -> events_pb2.GetEventsResponse:
         self.requests.append(request)
         excluded = set(request.exclude_ids)
+        candidates = [*self.prepended, *self.catalog]
         served = [
             event
-            for event in self.catalog
+            for event in candidates
             if event.id not in excluded
             and event.min_age <= request.age_years <= event.max_age
         ][: request.limit]
-        # FR-002: cada evento servido pertenece al país pedido. Se devuelve una
-        # copia para no mutar el catálogo estático.
+        # FR-002: un servicio conforme **atribuye** lo que sirve al país pedido.
+        # Lo que llegue con país propio se respeta: es como se simula un
+        # servicio que se salta el ámbito.
         scoped: list[events_pb2.LifeEvent] = []
         for event in served:
             copy = events_pb2.LifeEvent()
             copy.CopyFrom(event)
-            copy.country = request.country
+            if not copy.country:
+                copy.country = request.country
             scoped.append(copy)
         return events_pb2.GetEventsResponse(
             events=scoped,

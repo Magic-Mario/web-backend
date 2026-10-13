@@ -491,6 +491,24 @@ class GameService:
             )
             is not None
         ]
+        # FR-002 (T018): el servicio no estampa ya el país del jugador sobre un
+        # suceso ajeno, y un suceso genérico llega **sin** país. Aquí se
+        # comprueba en vez de confiar: lo que jamás puede presentarse es un
+        # suceso de **otro** país, y si llegara se descarta sin abortar la
+        # partida (edge cases de la spec).
+        foreign = sorted(
+            {event.country for event in served if event.country and event.country != life.country}
+        )
+        if foreign:
+            logger.warning(
+                "events.v2 devolvió sucesos de %s para una vida en %s; se descartan",
+                foreign,
+                life.country,
+            )
+            served = [
+                event for event in served if not event.country or event.country == life.country
+            ]
+
         # Defensa de SC-005: aunque el servicio llegara a repetir, la vida no.
         return [event for event in served if event.id not in excluded]
 

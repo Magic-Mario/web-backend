@@ -29,6 +29,7 @@ from domain.errors import DomainError
 from domain.events import EventSource, PresentedEvent
 from domain.models import STAT_NAMES
 from domain.service import GameService
+from grpc_client._generated import events_pb2
 from grpc_client.events import EventsClient
 from persistence.lives_repo import LivesRepo
 
@@ -362,3 +363,32 @@ def test_reloading_with_an_undecided_event_resumes_it(
         assert client.post("/lives/advance").status_code == 200
     finally:
         service.repo.delete_state(player_id)
+
+
+# --- FR-002 (T018): la segunda barrera contra un suceso ajeno --------------
+
+
+def test_a_foreign_event_is_dropped_before_it_reaches_the_player(
+    service: GameService, born: Callable[..., str], events_service: object
+) -> None:
+    """Si el servicio devolviera un suceso de otro país, no se presenta.
+
+    El microservicio ya filtra por procedencia (y tiene sus pruebas), pero el
+    ámbito es una obligación de FR-002 y merece **dos** barreras: la segunda
+    existe porque la primera podría fallar en una versión futura o con una
+    configuración rara, y entonces el defecto llegaría al jugador sin avisar.
+    """
+    player_id = born("YEAR")          # la vida nace en AR (conftest)
+    original = events_service.catalog[0]
+    ajeno = events_pb2.LifeEvent()
+    ajeno.CopyFrom(original)
+    ajeno.id = "suceso-de-otro-pais"
+    ajeno.country = "ES"
+    events_service.prepended = [ajeno]
+
+    outcome = service.advance_life(player_id=player_id)
+
+    presented = [event.id for event in outcome.events]
+    assert "suceso-de-otro-pais" not in presented, "FR-002: un suceso ajeno no se presenta"
+    assert outcome.events, "el lote no se queda vacío: los demás sucesos sí salen"
+    assert all(event.country == "AR" for event in outcome.events)

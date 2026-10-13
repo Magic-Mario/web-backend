@@ -19,16 +19,18 @@ Al final están las **3 vías de muerte**, la ausencia de edad máxima y el
 
 from __future__ import annotations
 
-import random as _random
 import uuid
 from dataclasses import replace
 
 import pytest
 
 from domain import service as domain_service
+from domain.drift import random_death_roll
 from domain.errors import DomainError
 from domain.events import EventOption, EventSource, EventType, PresentedEvent
 from domain.models import (
+    BIRTH_STAT_MAX,
+    BIRTH_STAT_MIN,
     INITIAL_STAT,
     RANDOM_DEATH_PROBABILITY,
     STAT_NAMES,
@@ -45,10 +47,16 @@ from domain.models import (
 )
 from domain.service import GameService
 
-# --- Stats: escala 0–100 y nacimiento en 50 (FR-004, FR-010, SC-003) ------
+# --- Stats: escala 0–100 y sorteo de nacimiento (FR-004, FR-010, SC-003) --
 
 
-def test_stats_born_at_50_and_stay_in_range() -> None:
+def test_stats_default_is_the_centre_of_the_range_and_stays_in_range() -> None:
+    """`Stats()` sin argumentos es el **defecto**, no el nacimiento (FR-010).
+
+    El nacimiento es una tirada por stat (lo prueba
+    `test_create_life_draws_every_stat_inside_the_birth_range`); este valor sólo
+    rellena una stat ausente en una fila vieja.
+    """
     stats = Stats()
     assert stats.to_dict() == {name: INITIAL_STAT for name in STAT_NAMES}
 
@@ -152,8 +160,8 @@ def test_event_option_must_belong_to_the_event() -> None:
 # --- Creación de la vida (T021 · US1) — ROJO hasta T024 -------------------
 
 
-def test_create_life_sets_the_initial_stats_to_50() -> None:
-    """FR-010: idénticas para todos, sea cual sea el nacimiento."""
+def test_create_life_draws_every_stat_inside_the_birth_range() -> None:
+    """FR-010 (D1): una tirada por stat dentro de 40–60, no un valor fijo."""
     from domain.service import GameService
 
     life = GameService().create_life(
@@ -164,12 +172,30 @@ def test_create_life_sets_the_initial_stats_to_50() -> None:
         birth_year=1990,
     )
 
-    assert life.stats.to_dict() == {
-        "health": 50,
-        "happiness": 50,
-        "intelligence": 50,
-        "looks": 50,
-    }
+    assert all(
+        BIRTH_STAT_MIN <= value <= BIRTH_STAT_MAX
+        for value in life.stats.to_dict().values()
+    ), life.stats.to_dict()
+
+
+def test_two_lives_do_not_born_with_the_same_stats() -> None:
+    """SC-011: la variedad **entre** vidas es el objetivo de la decisión D1."""
+    from domain.service import GameService
+
+    service = GameService()
+    drawn: set[tuple] = set()
+    for _ in range(6):
+        life = service.create_life(
+            player_id=str(uuid.uuid4()),
+            gender=Gender.MALE,
+            country="ES",
+            city="Madrid",
+            birth_year=1990,
+        )
+        drawn.add(tuple(sorted(life.stats.to_dict().items())))
+        service.repo.delete_state(life.player_id)
+
+    assert len(drawn) > 1, "seis vidas con las mismas cuatro stats: no hay sorteo"
 
 
 def test_create_life_includes_both_parents() -> None:
@@ -425,24 +451,6 @@ def test_a_monthly_period_is_also_one_batch(events_service: object) -> None:
 # --- Muerte: las 3 vías de FR-005 (T066 · US3) -----------------------------
 
 
-class _FixedRng:
-    """Ruleta fija: `random()` devuelve siempre el valor que se le pide.
-
-    Sin ella la probabilidad real (1 % con `YEAR`, 0,08 % con `MONTH`)
-    convertiría estas pruebas en una moneda al aire. El resto de métodos
-    (`choice`, `randint`, …) delegan en el módulo `random` de verdad.
-    """
-
-    def __init__(self, roll: float) -> None:
-        self._roll = roll
-
-    def random(self) -> float:
-        return self._roll
-
-    def __getattr__(self, name: str):
-        return getattr(_random, name)
-
-
 def _decide(service, player_id: str, option_id: str = "opt-2"):
     """Decide el suceso pendiente (FR-007: el contrato pide su `event_id`)."""
     pending = service.get_life(player_id).pending_event
@@ -455,9 +463,13 @@ def _decide(service, player_id: str, option_id: str = "opt-2"):
 def _kill_by_random(
     service: GameService, born, monkeypatch, granularity: str = "YEAR"
 ) -> str:
-    """Lleva una vida a `DEAD` por la vía aleatoria, sin depender de catálogos."""
+    """Lleva una vida a `DEAD` por la vía aleatoria, sin depender de catálogos.
+
+    FR-019: el azar sale de la semilla, así que la ruleta se sustituye en la
+    **tirada de muerte**, que es el único punto de azar que consulta la partida.
+    """
     player_id = born(granularity)
-    monkeypatch.setattr(domain_service, "random", _FixedRng(0.0))
+    monkeypatch.setattr(domain_service, "random_death_roll", lambda life: True)
     service.advance_life(player_id=player_id)
     outcome = _decide(service, player_id, "opt-1")
     assert outcome.dead and outcome.cause_of_death is CauseOfDeath.FATAL_RANDOM
@@ -525,33 +537,25 @@ def test_a_fatal_option_ends_the_life(service: GameService, born) -> None:
     assert outcome.life.stats.health > 0, "murió por la opción, no por la salud"
 
 
-@pytest.mark.parametrize(
-    ("granularity", "roll", "dies"),
-    [
-        # (granularidad, tirada de la ruleta, ¿muere?)
-        (Granularity.YEAR, 0.005, True),  # 0,005 ≤ 0,01
-        (Granularity.YEAR, 0.5, False),  # 0,5 > 0,01
-        (Granularity.MONTH, 0.005, False),  # 0,005 > 0,0008
-        (Granularity.MONTH, 0.0005, True),  # 0,0005 ≤ 0,0008
-    ],
-)
-def test_the_random_roll_uses_the_probability_of_the_granularity(
-    service: GameService,
-    born,
-    monkeypatch,
+@pytest.mark.parametrize("granularity", [Granularity.YEAR, Granularity.MONTH])
+def test_the_random_death_rate_matches_the_probability_of_the_granularity(
     granularity: Granularity,
-    roll: float,
-    dies: bool,
 ) -> None:
-    """FR-005: el riesgo se ajusta al período para que anualicen igual."""
-    player_id = born(granularity.value)
-    service.advance_life(player_id=player_id)
-    monkeypatch.setattr(domain_service, "random", _FixedRng(roll))
+    """FR-005: 1 % por período anual, y 1⁄12 de eso por mes (anualizan igual).
 
-    outcome = _decide(service, player_id, "opt-2")
+    Se mide la **tasa** sobre 100 000 semillas distintas en vez de falsear una
+    tirada: con FR-019 el azar ya no se sustituye por un número fijo, y la tasa
+    es exactamente lo que fija la spec. Las semillas son fijas, así que el
+    resultado es determinista y no una moneda al aire.
+    """
+    life = _life(age_months=12 * 30, granularity=granularity)
+    draws = 100_000
+    deaths = sum(
+        1 for seed in range(draws) if random_death_roll(replace(life, seed=seed))
+    )
 
-    assert outcome.dead is dies, f"{granularity.value} con tirada {roll}"
-    assert (outcome.cause_of_death is CauseOfDeath.FATAL_RANDOM) is dies
+    expected = life.random_death_probability * draws
+    assert abs(deaths - expected) <= 0.2 * expected, (granularity, deaths, expected)
 
 
 def test_there_is_no_age_ceiling(

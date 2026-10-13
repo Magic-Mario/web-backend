@@ -45,7 +45,6 @@ v1 solo hay una partida por jugador (FR-008).
 from __future__ import annotations
 
 import logging
-import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -55,11 +54,17 @@ from grpc_client.mapping import origin_is_seed, to_presented_event
 from persistence.lives_repo import LivesRepo
 
 from .catalog import validate_birth
+from .dice import PURPOSE_FATHER_NAME, PURPOSE_MOTHER_NAME, Dice, new_seed
+from .drift import HAPPINESS_FLUCTUATION, natural_drift, random_death_roll
 from .errors import DomainError
 from .events import EventOption, EventSource, PresentedEvent
 from .generic_events import generic_event
+from .names import FATHER_NAMES, MOTHER_NAMES
 from .models import (
+    BIRTH_STAT_MAX,
+    BIRTH_STAT_MIN,
     STAT_MIN,
+    STAT_NAMES,
     CauseOfDeath,
     Gender,
     Granularity,
@@ -68,6 +73,7 @@ from .models import (
     LifeStatus,
     PersonaCercana,
     Relation,
+    Stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,23 +85,6 @@ MIN_BIRTH_YEAR = 1900
 #: RELATIONSHIPS y, cuando toca, el MAIN del año. El microservicio nunca
 #: devuelve más que esto.
 BATCH_LIMIT = 3
-
-#: FR-011: deriva natural. La salud es una stat **jugable**: de joven se
-#: recupera (+1 punto por año cumplido hasta `HEALTH_PEAK_YEARS`) y en la
-#: vejez decae, perdiendo un punto por año a partir de ahí y un punto más
-#: cada `HEALTH_DECAY_STEP_YEARS` años (40 → −1, 60 → −2, 80 → −3, …).
-#: Así un personaje joven puede volver a subir de salud —también con las
-#: opciones positivas de `generic_events.py`— mientras la muerte por salud
-#: a `0` sigue siendo posible en la vejez. La felicidad fluctúa en ±3 cada
-#: período. Se aplica **siempre**, aunque no llegue ningún evento, y es lo
-#: que garantiza que una vida sin edad máxima pueda terminar.
-HAPPINESS_FLUCTUATION = 3
-#: Edad a partir de la cual la salud pasa de recuperarse a decaer.
-HEALTH_PEAK_YEARS = 40
-#: La pérdida anual crece un punto cada 20 años vividos por encima del pico.
-HEALTH_DECAY_STEP_YEARS = 20
-#: Recuperación anual de salud por debajo de `HEALTH_PEAK_YEARS`.
-HEALTH_YEARLY_RECOVERY = 1
 
 #: FR-020: el resumen de fin de vida agrupa el historial por el **sistema** que
 #: cada suceso declara (`LifeEvent.system`), no por su tipo de evento: con
@@ -149,71 +138,6 @@ class LifeSummary:
     cause_of_death: CauseOfDeath
     by_system: dict[str, SystemDigest]
 
-
-def natural_drift(life: Life, months: int) -> dict[str, int]:
-    """Deriva natural de este período (FR-011).
-
-    La salud sólo se toma al **cumplir años**, de modo que el riesgo anual
-    es idéntico con granularidad `YEAR` y con `MONTH`: una vida mensual
-    sólo nota la deriva de salud una sola vez cada doce avances, igual que
-    una anual. Depende **sólo de la edad cumplida**, así que ambos modos
-    dan exactamente el mismo balance anualizado.
-
-    Y esa deriva es amable de joven —`+1` por año por debajo de
-    `HEALTH_PEAK_YEARS`, con lo que la salud puede subir— y netamente
-    negativa en la vejez: a partir del pico resta `1` punto el primer
-    tramo y un punto más cada `HEALTH_DECAY_STEP_YEARS` años, de modo que
-    la caída se acelera con los años y la muerte por salud a `0` sigue
-    siendo posible en la vejez. La felicidad fluctúa en todos los
-    períodos.
-    """
-    age_months = life.age_months + months
-    health = 0
-    if age_months % 12 == 0:
-        age_years = age_months // 12
-        if age_years < HEALTH_PEAK_YEARS:
-            health = HEALTH_YEARLY_RECOVERY
-        else:
-            decay = (age_years - HEALTH_PEAK_YEARS) // HEALTH_DECAY_STEP_YEARS
-            health = -(1 + decay)
-    return {
-        "health": health,
-        "happiness": random.randint(-HAPPINESS_FLUCTUATION, HAPPINESS_FLUCTUATION),
-    }
-
-
-#: Nombres con los que nacen los padres (FR-014 pide nombre, no identidad).
-FATHER_NAMES: tuple[str, ...] = (
-    "Antonio",
-    "Carlos",
-    "Daniel",
-    "Diego",
-    "Francisco",
-    "Javier",
-    "Jorge",
-    "Luis",
-    "Manuel",
-    "Miguel",
-    "Pedro",
-    "Rafael",
-)
-
-MOTHER_NAMES: tuple[str, ...] = (
-    "Ana",
-    "Carmen",
-    "Clara",
-    "Elena",
-    "Isabel",
-    "Laura",
-    "Lucía",
-    "María",
-    "Marta",
-    "Patricia",
-    "Rocío",
-    "Sofía",
-)
-
-
 class GameService:
     """Creador, lector y jugador de vidas sobre el repositorio propio."""
 
@@ -251,6 +175,7 @@ class GameService:
         granularity: Granularity | str | None = None,
     ) -> Life:
         """Crea la vida y la persiste (FR-001). Lanza `409` si ya existe."""
+        seed = new_seed()
         life = Life(
             player_id=self._validate_player_id(player_id),
             gender=self._validate_gender(gender),
@@ -258,7 +183,20 @@ class GameService:
             city=city,
             birth_year=self._validate_birth_year(birth_year),
             granularity=self._validate_granularity(granularity),
-            people=self._new_parents(),
+            # FR-019: la semilla se sortea **una vez** aquí y de ella se derivan
+            # el nacimiento, la deriva, la muerte y los nombres.
+            seed=seed,
+            # FR-010: una tirada independiente por stat dentro del rango. No es
+            # un valor fijo para todo el mundo, y queda persistido con la vida.
+            stats=Stats(
+                **{
+                    name: Dice(seed).between(
+                        f"birth.{name}", 0, BIRTH_STAT_MIN, BIRTH_STAT_MAX
+                    )
+                    for name in STAT_NAMES
+                }
+            ),
+            people=self._new_parents(seed),
         )
         validate_birth(life.country, life.city)
 
@@ -520,7 +458,7 @@ class GameService:
         if life.stats.health <= STAT_MIN:
             return CauseOfDeath.HEALTH_ZERO
         # `≤` como en la transición del data-model (§1 «Transiciones de estado»).
-        if random.random() <= life.random_death_probability:
+        if random_death_roll(life):
             return CauseOfDeath.FATAL_RANDOM
         return None
 
@@ -574,9 +512,18 @@ class GameService:
         return birth_year
 
     @staticmethod
-    def _new_parents() -> list[PersonaCercana]:
-        """FR-014: los padres existen desde la creación, ambos vivos."""
+    def _new_parents(seed: int) -> list[PersonaCercana]:
+        """FR-014: los padres existen desde la creación, ambos vivos.
+
+        Los nombres salen de la semilla (FR-019): la misma vida nace con los
+        mismos padres aunque se reconstruya el estado.
+        """
+        dice = Dice(seed)
         return [
-            PersonaCercana(random.choice(FATHER_NAMES), Relation.FATHER),
-            PersonaCercana(random.choice(MOTHER_NAMES), Relation.MOTHER),
+            PersonaCercana(
+                dice.pick(PURPOSE_FATHER_NAME, FATHER_NAMES), Relation.FATHER
+            ),
+            PersonaCercana(
+                dice.pick(PURPOSE_MOTHER_NAME, MOTHER_NAMES), Relation.MOTHER
+            ),
         ]

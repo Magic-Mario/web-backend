@@ -11,17 +11,17 @@ servidor `EventsService` de referencia en proceso, sobre un puerto efímero de
 `events.default.svc:50051` (que no existe en local) y el round-trip
 crear → avanzar → decidir se quedaría sin evento.
 
-También se sustituye `domain.service.random` por una ruleta que **nunca**
-sale mortal: la probabilidad aleatoria de muerte (FR-005, 0,01 con
-granularidad `YEAR`) convertiría el gate en un fallo 1 de cada 100
-ejecuciones. Los tests que sí necesitan muerte aleatoria (T066) sustituyen la
-ruleta con `monkeypatch.setattr(domain.service, "random", ...)`.
+También se desactiva la **tirada de muerte aleatoria** (FR-005): con FR-019 el
+azar ya no es del proceso, así que se sustituye la función
+`domain.service.random_death_roll` por una que nunca sale mortal. Si no, la
+probabilidad real (1 % por período con granularidad `YEAR`) convertiría el gate
+en un fallo 1 de cada 100 ejecuciones. Los tests que sí necesitan morir la
+vuelven a sustituir con `monkeypatch.setattr(...)`.
 """
 
 from __future__ import annotations
 
 import os
-import random
 import socket
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -143,26 +143,6 @@ class ReferenceEventsServicer(events_pb2_grpc.EventsServiceServicer):
         )
 
 
-class _NeverFatalRng:
-    """Sustituto de `domain.service.random` que jamás sale mortal.
-
-    Sólo intercepta `random()`, que es la tirada de la muerte aleatoria
-    (FR-005); todo lo demás (`choice`, `randint`, …) se delega al módulo real.
-
-    ⚠️ No puede ser una subclase de `random.Random` que redefina `random()`:
-    al hacerlo, CPython deja de emparejar `_randbelow_with_getrandbits` y usa
-    `_randbelow_without_getrandbits`, que recalcula el valor con `random()`
-    hasta que cae por debajo del límite… un `random()` fijo en `1.0` es un
-    bucle infinito (medido: la suite se colgaba en `create_life`).
-    """
-
-    def random(self) -> float:
-        return 1.0
-
-    def __getattr__(self, name: str):
-        return getattr(random, name)
-
-
 #: Nacimiento válido para la suite (FR-001): el catálogo acepta AR/Buenos Aires.
 BIRTH: dict[str, object] = {
     "gender": "MALE",
@@ -179,7 +159,13 @@ _SERVER.add_insecure_port(os.environ["EVENTS_GRPC_ADDRESS"])
 _SERVER.start()
 
 # 3) Regla del juego fuera del camino de la suite (ver doc del módulo).
-_domain_service.random = _NeverFatalRng()
+#
+# FR-019: el azar ya no es del proceso —sale de la semilla de cada vida—, así
+# que el punto de sustitución es la **tirada de muerte**. Por defecto las vidas
+# de prueba no mueren por azar: con 1 % por período, una vida de 25 períodos
+# moriría casi con seguridad (1 − 0.99²⁵ ≈ 22 %) y la suite dejaría de medir lo
+# que quiere medir. Las pruebas que necesitan morir la sustituyen.
+_domain_service.random_death_roll = lambda life: False
 
 
 def pytest_sessionfinish(session: object, exitstatus: int) -> None:

@@ -23,12 +23,19 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping
 
+from .dice import seed_for
 from .errors import DomainError
 from .events import EventSource, EventType, PresentedEvent
 
-# Escala de stats (FR-004) y valor de nacimiento (FR-010).
+# Escala de stats (FR-004) y rango de nacimiento (FR-010).
 STAT_MIN = 0
 STAT_MAX = 100
+
+#: FR-010: rango del **sorteo** de nacimiento, por stat e independiente.
+BIRTH_STAT_MIN = 40
+BIRTH_STAT_MAX = 60
+
+#: Valor por defecto de una stat ausente en una fila vieja (el centro del rango).
 INITIAL_STAT = 50
 
 #: Escala de la gauge oculta de relación por persona cercana (FR-018, D5).
@@ -120,8 +127,9 @@ def _clamp_relationship(value: int) -> int:
 class Stats:
     """Las cuatro stats básicas en escala 0–100 (FR-004, FR-010).
 
-    Todas nacen en `INITIAL_STAT` (50) y no pueden salirse de `[0, 100]`
-    (SC-003): los deltas de una decisión se recortan al aplicarlos.
+    Nacen de un **sorteo acotado** por vida (`rango 40–60`, FR-010) que hace el
+    servicio con la semilla de la vida; aquí sólo se acotan a `[0, 100]`
+    (SC-003), porque los deltas de una decisión se recortan al aplicarlos.
     """
 
     health: int = INITIAL_STAT
@@ -311,6 +319,11 @@ class Life:
     city: str
     birth_year: int
     granularity: Granularity
+    #: FR-019 (D6): semilla de la vida. **Todo** sorteo sale de
+    #: `H(seed ‖ propósito ‖ período)`, así que una vida es reproducible y un
+    #: reintento no vuelve a tirar. `0` sólo aparece en vidas anteriores a
+    #: FR-019 y `from_dict` la deriva de forma estable (ver `dice.seed_for`).
+    seed: int = 0
     age_months: int = 0
     stats: Stats = field(default_factory=Stats)
     status: LifeStatus = LifeStatus.ALIVE
@@ -403,6 +416,7 @@ class Life:
             "city": self.city,
             "birth_year": self.birth_year,
             "granularity": self.granularity.value,
+            "seed": self.seed,
             "age_months": self.age_months,
             "current_year": self.current_year,
             "current_decade": self.decade,
@@ -436,6 +450,10 @@ class Life:
             city=data["city"],
             birth_year=int(data["birth_year"]),
             granularity=Granularity(data["granularity"]),
+            # FR-019: una fila escrita antes del `seed` lo deriva de su identidad
+            # (estable), así que la partida en curso no se rompe ni gana azar.
+            seed=int(data.get("seed") or 0)
+            or seed_for(data["player_id"], int(data["birth_year"])),
             age_months=int(data.get("age_months", 0)),
             stats=Stats.from_dict(data.get("stats")),
             status=LifeStatus(data.get("status", LifeStatus.ALIVE.value)),

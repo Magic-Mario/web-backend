@@ -18,7 +18,6 @@ Dos apuntes sobre cómo se llega a cada estado:
 
 from __future__ import annotations
 
-import random as _random
 import uuid
 
 from fastapi.testclient import TestClient
@@ -32,14 +31,10 @@ ROUNDS = 25
 
 
 class _AlwaysFatalRng:
-    """Ruleta que siempre sale mortal: `random()` devuelve `0.0`."""
+    """Ruleta que siempre sale mortal, para la tirada de muerte (FR-019)."""
 
-    def random(self) -> float:
-        return 0.0
-
-    def __getattr__(self, name: str):
-        # El resto de métodos (`choice`, `randint`) siguen siendo aleatorios.
-        return getattr(_random, name)
+    def __call__(self, life: object) -> bool:
+        return True
 
 
 def _client(player_id: str) -> TestClient:
@@ -69,7 +64,7 @@ def _play_until_death(
         service.advance_life(player_id=player_id)
         _resolve_period(service, player_id, "opt-2")
 
-    monkeypatch.setattr(domain_service, "random", _AlwaysFatalRng())
+    monkeypatch.setattr(domain_service, "random_death_roll", _AlwaysFatalRng())
     service.advance_life(player_id=player_id)
     pending = service.get_life(player_id).pending_event
     assert pending is not None
@@ -157,4 +152,5 @@ def test_the_life_can_be_deleted_and_started_again(born) -> None:
         },
     )
     assert created.status_code == 201, created.text
-    assert created.json()["stats"]["health"] == 50
+    # FR-010 (D1): la vida nueva sortea sus stats dentro del rango de nacimiento.
+    assert all(40 <= value <= 60 for value in created.json()["stats"].values())

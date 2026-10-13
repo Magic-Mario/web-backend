@@ -3,7 +3,7 @@
 Escrito **antes** de la implementación (test-first): rojo hasta T024/T025.
 
 Cubre el contrato de `POST /lives`, `GET /lives` y `GET /catalog/birth`:
-validación de nacimiento (FR-001), stats en 50 (FR-010), padres (FR-014),
+validación de nacimiento (FR-001), stats sorteadas en 40–60 (FR-010), padres (FR-014),
 vida única por jugador (FR-008) y el catálogo embebido.
 """
 
@@ -31,19 +31,16 @@ def _client(player_id: str | None = None) -> TestClient:
 
 
 def test_valid_creation_returns_initial_stats_and_parents() -> None:
-    """FR-010 + FR-014: 4 stats en 50 y al menos padre y madre."""
+    """FR-010 + FR-014: 4 stats sorteadas en 40–60 y al menos padre y madre."""
     client = _client()
 
     response = client.post("/lives", json=VALID_BIRTH)
     assert response.status_code == 201, response.text
 
     life = response.json()
-    assert life["stats"] == {
-        "health": 50,
-        "happiness": 50,
-        "intelligence": 50,
-        "looks": 50,
-    }
+    # FR-010 (D1): una tirada por stat dentro del rango, no 50 para todos.
+    assert all(40 <= value <= 60 for value in life["stats"].values()), life["stats"]
+    assert set(life["stats"]) == {"health", "happiness", "intelligence", "looks"}
     relations = {person["relation"] for person in life["people"]}
     assert {"FATHER", "MOTHER"} <= relations, life["people"]
     assert all(person["name"] for person in life["people"])

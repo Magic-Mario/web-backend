@@ -104,7 +104,7 @@ def test_player_id_header_is_required_and_validated() -> None:
 
 
 def test_create_life_returns_initial_stats_and_parents() -> None:
-    """US1 · FR-001, FR-010, FR-014: validación, stats en 50 y padres."""
+    """US1 · FR-001, FR-010, FR-014: validación, stats sorteadas y padres."""
     spec = _load_spec()
     life_schema = spec["components"]["schemas"]["Life"]
 
@@ -114,13 +114,8 @@ def test_create_life_returns_initial_stats_and_parents() -> None:
     for field in life_schema["required"]:
         assert field in life, f"falta el campo obligatorio {field}"
 
-    # FR-010: idénticas para todos, sea cual sea el nacimiento.
-    assert life["stats"] == {
-        "health": 50,
-        "happiness": 50,
-        "intelligence": 50,
-        "looks": 50,
-    }, life["stats"]
+    # FR-010 (D1): una tirada por stat dentro del rango, no 50 para todos.
+    assert all(40 <= value <= 60 for value in life["stats"].values()), life["stats"]
 
     # FR-014: los padres existen desde la creación.
     relations = {p["relation"] for p in life["people"]}
@@ -197,7 +192,7 @@ def test_summary_gated_until_death_and_new_life_allowed() -> None:
     assert client.get("/lives/summary").status_code == 404
 
     # SC-004: nunca bloquea la interfaz — se puede crear otra vida.
-    assert _new_life(client)["stats"]["health"] == 50
+    assert all(40 <= value <= 60 for value in _new_life(client)["stats"].values())
 
 
 def test_api_prefix_matches_root_contract() -> None:

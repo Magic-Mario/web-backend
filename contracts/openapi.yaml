@@ -259,7 +259,19 @@ components:
           enum: [FATHER, MOTHER, SIBLING, FRIEND, PARTNER]
         state:
           type: string
-          enum: [ALIVE, DEAD, TOGETHER, SEPARATED]
+          enum: [ALIVE, DEAD, TOGETHER, SEPARATED, ESTRANGED]
+          description: >
+            `TOGETHER`/`SEPARATED` sólo aplican a `PARTNER`; `ESTRANGED` es el
+            final de un hermano o un amigo (FR-018).
+        relationship:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: >
+            Calidad de la relación 0–100, oculta para el jugador como número y
+            visible como barra en el perfil. Decae cada período y la mueven las
+            decisiones de RELATIONSHIPS (FR-018).
+          example: 70
 
     Granularity:
       type: string
@@ -339,7 +351,7 @@ components:
             Suceso presentado en el período en curso y todavía sin decidir,
             o `null` si no lo hay. Sólo lo devuelve `GET /lives`, para que
             recargar la página retome la partida sin perder ese progreso
-            (SC-006); `POST /lives/advance` lo trae en su campo `event`.
+            (SC-006); `POST /lives/advance` lo trae en su campo `events`.
           allOf:
             - $ref: "#/components/schemas/PresentedEvent"
 
@@ -361,7 +373,10 @@ components:
         id:    { type: string, example: "1990-acontecimientos-0042" }
         type:
           type: string
-          enum: [COTIDIANO, EDUCATIVO, LABORAL, RELACION, SENTIMENTAL]
+          enum: [MAIN, DAILY, RELATIONSHIPS]
+          description: >
+            MAIN es el suceso destacado del año; DAILY y RELATIONSHIPS salen del
+            perfil de la década (FR-003).
         text:
           type: string
           description: enunciado en español, derivado de un suceso real de la época
@@ -373,20 +388,41 @@ components:
           type: string
           enum: [WIKIPEDIA, SEED]
           description: SEED cuando falló la búsqueda externa (edge cases)
+        country:
+          type: string
+          description: país al que pertenece el suceso (FR-002)
+          example: "AR"
         options:
           type: array
           minItems: 2
+          maxItems: 4
           items:
             $ref: "#/components/schemas/EventOption"
 
     AdvanceResponse:
       type: object
-      required: [life, event]
+      required: [life, age_years, events, period_complete]
       properties:
         life:
           $ref: "#/components/schemas/Life"
-        event:
-          $ref: "#/components/schemas/PresentedEvent"
+        age_years:
+          type: integer
+          description: edad en años cumplidos al abrir el período
+          example: 1
+        events:
+          type: array
+          minItems: 1
+          maxItems: 3
+          description: >
+            El lote del período: un DAILY, un RELATIONSHIPS y el MAIN del año,
+            que el jugador resuelve en orden con `POST /lives/decision` (FR-007).
+          items:
+            $ref: "#/components/schemas/PresentedEvent"
+        period_complete:
+          type: boolean
+          description: >
+            `false` justo después de avanzar, porque el avance **abre** el
+            período; pasa a `true` en la decisión que resuelve su último suceso.
         derived:
           type: object
           description: delta aplicado por la deriva natural de este período (FR-011)
@@ -396,16 +432,22 @@ components:
 
     DecisionRequest:
       type: object
-      required: [option_id]
+      required: [event_id, option_id]
       additionalProperties: false
       properties:
+        event_id:
+          type: string
+          description: >
+            Debe ser el suceso pendiente del lote (`pending_batch[batch_cursor]`).
+            Si no coincide, la respuesta es `409` (FR-007).
+          example: "1990-acontecimientos-0042"
         option_id:
           type: string
           example: "opt-1"
 
     DecisionResponse:
       type: object
-      required: [life, deltas, dead]
+      required: [life, deltas, dead, period_complete]
       properties:
         life:
           $ref: "#/components/schemas/Life"
@@ -415,6 +457,11 @@ components:
           additionalProperties:
             type: integer
           example: { health: -5, happiness: 8 }
+        period_complete:
+          type: boolean
+          description: >
+            `true` cuando esta decisión resolvió el último suceso del período y
+            se puede volver a avanzar (FR-007).
         dead:
           type: boolean
         cause_of_death:

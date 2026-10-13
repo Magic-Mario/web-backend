@@ -278,6 +278,24 @@ class LifeEvent:
         )
 
 
+def _restore_batch(data: Mapping[str, Any]) -> list[PresentedEvent]:
+    """Reconstruye el lote del período (FR-007) a partir de una fila guardada.
+
+    Las filas escritas antes del lote (002) traen `reserve[]` y un
+    `pending_event` suelto: se reordenan como lote con el cursor a 0, de modo
+    que una partida a medias **sobrevive** a esta actualización y sigue
+    mostrando el mismo suceso que tenía pendiente.
+    """
+    batch = [PresentedEvent.from_dict(e) for e in (data.get("pending_batch") or [])]
+    if batch:
+        return batch
+    legacy: list[PresentedEvent] = []
+    if data.get("pending_event"):
+        legacy.append(PresentedEvent.from_dict(data["pending_event"]))
+    legacy.extend(PresentedEvent.from_dict(e) for e in (data.get("reserve") or []))
+    return legacy
+
+
 @dataclass
 class Life:
     """Vida en curso (data-model §1). Fila `PK = PLAYER#<uuid>`, `SK = STATE`.
@@ -298,8 +316,11 @@ class Life:
     status: LifeStatus = LifeStatus.ALIVE
     cause_of_death: CauseOfDeath | None = None
     people: list[PersonaCercana] = field(default_factory=list)
-    reserve: list[PresentedEvent] = field(default_factory=list)
-    pending_event: PresentedEvent | None = None
+    #: FR-007: los sucesos del período en curso, en orden de presentación.
+    pending_batch: list[PresentedEvent] = field(default_factory=list)
+    #: Índice del siguiente suceso a resolver; `== len(pending_batch)` cierra el
+    #: período. Sustituye a la antigua `reserve[]` de un solo evento.
+    batch_cursor: int = 0
     consumed_ids: list[str] = field(default_factory=list)
     sequence: int = 0
     created_at: str = field(default_factory=now_utc_rfc3339)
@@ -352,6 +373,23 @@ class Life:
     def is_alive(self) -> bool:
         return self.status is LifeStatus.ALIVE
 
+    @property
+    def pending_event(self) -> PresentedEvent | None:
+        """El suceso que el jugador está viendo ahora (data-model §1, FR-007).
+
+        **Derivado** del lote y del cursor: no se guarda aparte, para que no
+        haya dos fuentes de verdad que puedan divergir. `None` cuando el
+        período ya está resuelto (o recién abierto, antes de avanzar).
+        """
+        if 0 <= self.batch_cursor < len(self.pending_batch):
+            return self.pending_batch[self.batch_cursor]
+        return None
+
+    @property
+    def period_complete(self) -> bool:
+        """FR-007: no queda ningún suceso del período por resolver."""
+        return self.batch_cursor >= len(self.pending_batch)
+
     def touch(self) -> None:
         self.updated_at = now_utc_rfc3339()
 
@@ -367,6 +405,7 @@ class Life:
             "granularity": self.granularity.value,
             "age_months": self.age_months,
             "current_year": self.current_year,
+            "current_decade": self.decade,
             "stats": self.stats.to_dict(),
             "status": self.status.value,
             "cause_of_death": (
@@ -374,7 +413,10 @@ class Life:
             ),
             "random_death_probability": self.random_death_probability,
             "people": [person.to_dict() for person in self.people],
-            "reserve": [event.to_dict() for event in self.reserve],
+            "pending_batch": [event.to_dict() for event in self.pending_batch],
+            "batch_cursor": self.batch_cursor,
+            # Derivado, pero se emite: el navegador sólo necesita el suceso en
+            # curso (`GET /lives` lo usa para retomar la partida, SC-006).
             "pending_event": (
                 self.pending_event.to_dict() if self.pending_event else None
             ),
@@ -403,14 +445,8 @@ class Life:
                 else None
             ),
             people=[PersonaCercana.from_dict(p) for p in (data.get("people") or [])],
-            reserve=[
-                PresentedEvent.from_dict(e) for e in (data.get("reserve") or [])
-            ],
-            pending_event=(
-                PresentedEvent.from_dict(data["pending_event"])
-                if data.get("pending_event")
-                else None
-            ),
+            pending_batch=_restore_batch(data),
+            batch_cursor=int(data.get("batch_cursor", 0)),
             consumed_ids=[str(i) for i in (data.get("consumed_ids") or [])],
             sequence=int(data.get("sequence", 0)),
             created_at=data.get("created_at") or now_utc_rfc3339(),

@@ -100,10 +100,21 @@ def test_the_endpoint_returns_the_exact_shape_in_chronological_order() -> None:
     player_id = client.headers["X-Player-Id"]
     _new_life(client)
 
+    # Dos períodos resueltos: cada uno abre su lote (FR-007) y se resuelve en
+    # orden, un suceso por decisión.
+    presented: list[dict] = []
     for _ in range(2):
-        assert client.post("/lives/advance").status_code == 200
-        decided = client.post("/lives/decision", json={"option_id": "opt-1"})
-        assert decided.status_code == 200, decided.text
+        advanced = client.post("/lives/advance")
+        assert advanced.status_code == 200, advanced.text
+        events = advanced.json()["events"]
+        assert events, "el período siempre trae al menos un suceso"
+        for event in events:
+            presented.append(event)
+            decided = client.post(
+                "/lives/decision",
+                json={"event_id": event["id"], "option_id": "opt-1"},
+            )
+            assert decided.status_code == 200, decided.text
 
     response = client.get("/lives/events")
     assert response.status_code == 200, response.text
@@ -111,12 +122,17 @@ def test_the_endpoint_returns_the_exact_shape_in_chronological_order() -> None:
 
     assert set(body) == {"player_id", "count", "events"}
     assert body["player_id"] == player_id
-    assert body["count"] == len(body["events"]) == 2
+    assert body["count"] == len(body["events"]) == len(presented)
 
-    # Orden cronológico: `seq` ascendente.
-    assert [event["seq"] for event in body["events"]] == [1, 2]
+    # Orden cronológico: `seq` ascendente y el mismo orden en que se sirvieron.
+    assert [event["seq"] for event in body["events"]] == list(
+        range(1, len(presented) + 1)
+    )
+    assert [event["event_id"] for event in body["events"]] == [
+        event["id"] for event in presented
+    ]
 
-    first, second = body["events"]
+    first = body["events"][0]
     assert set(first) == ITEM_KEYS
     assert first["period_index"] == 1
     assert (first["age_months"], first["age_years"]) == (12, 1)
@@ -131,11 +147,13 @@ def test_the_endpoint_returns_the_exact_shape_in_chronological_order() -> None:
     assert first["fatal"] is False
     assert first["source"] == "WIKIPEDIA"
 
-    assert (second["seq"], second["period_index"]) == (2, 2)
-    assert (second["age_months"], second["age_years"]) == (24, 2)
-    assert second["event_id"] == "ev-002"
-    assert second["type"] == "RELATIONSHIPS"
-    assert second["source"] == "WIKIPEDIA"
+    # El segundo período llega con su propia edad y sin repetir ids (SC-005).
+    second_period = [
+        event for event in body["events"] if event["period_index"] == 2
+    ]
+    assert second_period, "faltan las filas del segundo período"
+    assert (second_period[0]["age_months"], second_period[0]["age_years"]) == (24, 2)
+    assert len({event["event_id"] for event in body["events"]}) == len(presented)
 
     # El mismo contenido, también bajo el prefijo del ALB.
     prefixed = client.get("/api/lives/events")

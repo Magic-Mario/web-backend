@@ -14,7 +14,7 @@ Cubre lo que pide T039:
 - ninguna opción sin `deltas` (SC-003);
 - el `limit` de 5 (anual) / 2 (mensual) y el resto del lote en reserva
   (FR-003a, Decisión 5);
-- `reserve[]` reutilizada sin volver a consultar;
+- `pending_batch[]` con su `batch_cursor`: el lote entero del período;
 - `consumed_ids[]` sin repetir en 20 avances (SC-005);
 - el edge case *"el microservicio no responde → el avance continúa"*.
 """
@@ -36,14 +36,22 @@ from persistence.lives_repo import LivesRepo
 # comparten `test_advance.py`, `test_summary.py` y `test_domain.py`.
 
 
-def _decide(service: GameService, player_id: str) -> object:
-    return service.submit_decision(player_id=player_id, option_id="opt-1")
+def _decide(service: GameService, player_id: str, option_id: str = "opt-1") -> object:
+    """Decide el suceso pendiente.
+
+    FR-007: el contrato exige mandar el `event_id` del suceso que se resuelve.
+    """
+    pending = service.get_life(player_id).pending_event
+    assert pending is not None, "no hay suceso pendiente que decidir"
+    return service.submit_decision(
+        player_id=player_id, event_id=pending.id, option_id=option_id
+    )
 
 
 # --- edad y un solo evento por período (FR-002, FR-003) --------------------
 
 
-def test_year_granularity_jumps_twelve_months_and_presents_one_event(
+def test_year_granularity_jumps_twelve_months_and_opens_the_batch(
     service: GameService, born: Callable[..., str], events_service: object
 ) -> None:
     player_id = born("YEAR")
@@ -53,24 +61,29 @@ def test_year_granularity_jumps_twelve_months_and_presents_one_event(
     assert first.life.age_months == 12
     assert first.life.current_year == 1991
     assert first.life.period_index == 1
-    assert isinstance(first.event, PresentedEvent)
-    assert first.event.text and len(first.event.options) >= 2
 
-    # Un único evento por período: el que está pendiente de decisión.
+    # FR-007: el avance abre el **lote** del período, de 1 a 3 sucesos.
+    assert 1 <= len(first.events) <= 3
+    for event in first.events:
+        assert isinstance(event, PresentedEvent)
+        assert event.text and len(event.options) >= 2
+
+    # El primero queda pendiente y el cursor arranca en 0 (data-model §1).
+    assert first.life.batch_cursor == 0
+    assert first.life.period_complete is False
     assert first.life.pending_event is not None
-    assert first.life.pending_event.id == first.event.id
+    assert first.life.pending_event.id == first.events[0].id
+    assert first.life.pending_batch == first.events
 
-    # El resto del lote devuelto queda en reserva, sin presentarse (Decisión 5).
-    assert len(first.life.reserve) == 4
-    assert first.event.id not in {event.id for event in first.life.reserve}
+    # Una única consulta, pidiendo como mucho el lote entero (FR-007).
     assert len(events_service.requests) == 1
-    assert events_service.requests[0].limit == 5
+    assert events_service.requests[0].limit == 3
 
     # Persiste: recargar la partida devuelve el mismo estado (FR-008, SC-006).
     assert service.get_life(player_id).age_months == 12
 
 
-def test_month_granularity_advances_one_month_per_event(
+def test_month_granularity_advances_one_month_per_period(
     service: GameService, born: Callable[..., str], events_service: object
 ) -> None:
     player_id = born("MONTH")
@@ -81,7 +94,7 @@ def test_month_granularity_advances_one_month_per_event(
     assert outcome.life.current_year == 1990
     assert outcome.life.period_index == 1
     assert len(events_service.requests) == 1
-    assert events_service.requests[0].limit == 2
+    assert events_service.requests[0].limit == 3
 
 
 def test_a_period_cannot_be_advanced_twice_without_deciding(
@@ -136,7 +149,7 @@ def test_no_offered_option_is_left_without_scores(
 ) -> None:
     """SC-003: 100 % de las decisiones con cambio observable."""
     player_id = born()
-    event = service.advance_life(player_id=player_id).event
+    event = service.advance_life(player_id=player_id).events[0]
 
     assert len(event.options) >= 2
     for option in event.options:
@@ -144,52 +157,52 @@ def test_no_offered_option_is_left_without_scores(
         assert set(option.scores) <= set(STAT_NAMES)
 
 
-# --- límite por período y cola de reserva (FR-003a, Decisión 5) -----------
+# --- lote del período y no repetición (FR-007, SC-005) --------------------
 
 
-def test_a_new_period_only_fetches_events_when_the_reserve_is_empty(
+def test_a_period_is_one_batch_and_advancing_mid_batch_is_rejected(
     service: GameService, born: Callable[..., str], events_service: object
 ) -> None:
+    """FR-007: mientras quede un suceso del lote, avanzar es un 409."""
     player_id = born("YEAR")
 
-    for _ in range(5):
-        service.advance_life(player_id=player_id)
-        _decide(service, player_id)
-
-    # 5 avances con `limit = 5`: una única consulta al microservicio.
+    outcome = service.advance_life(player_id=player_id)
     assert len(events_service.requests) == 1
 
+    for _ in range(len(outcome.events) - 1):
+        partial = _decide(service, player_id, "opt-2")
+        assert partial.period_complete is False
+        with pytest.raises(DomainError) as exc:
+            service.advance_life(player_id=player_id)
+        assert exc.value.code == "CONFLICT"
+
+    # Resuelto el último, el período se cierra y el avance vuelve a permitirse.
+    last = _decide(service, player_id, "opt-2")
+    assert last.period_complete is True
     service.advance_life(player_id=player_id)
     assert len(events_service.requests) == 2
-    assert events_service.requests[1].limit == 5
 
 
-def test_consumed_ids_never_repeat_an_event_in_twenty_advances(
+def test_consumed_ids_never_repeat_an_event_in_twenty_periods(
     service: GameService, born: Callable[..., str], events_service: object
 ) -> None:
-    """SC-005: 20 avances sin repetir indefinidamente el mismo suceso."""
+    """SC-005: 20 períodos sin repetir indefinidamente el mismo suceso."""
     player_id = born()
     presented: list[str] = []
-    requests_before = 0
 
     for _ in range(20):
         outcome = service.advance_life(player_id=player_id)
+        for event in outcome.events:
+            presented.append(event.id)
+            # `opt-2` no toca la salud: si en 20 períodos eligiéramos la opción
+            # que resta salud acabaríamos muriendo por derivación (FR-005).
+            service.submit_decision(
+                player_id=player_id, event_id=event.id, option_id="opt-2"
+            )
 
-        # Toda consulta nueva va con lo ya servido en `exclude_ids`.
-        if len(events_service.requests) > requests_before:
-            latest = events_service.requests[-1]
-            assert set(latest.exclude_ids) >= set(presented)
-            assert latest.limit == 5
-        requests_before = len(events_service.requests)
-
-        presented.append(outcome.event.id)
-        # `opt-2` no toca la salud: si en 20 avances eligiéramos la opción
-        # que resta 2 de salud acabaríamos muriendo por derivación (FR-005).
-        service.submit_decision(player_id=player_id, option_id="opt-2")
-
-    assert len(presented) == 20
-    assert len(set(presented)) == 20, "SC-005: un suceso repetido"
-    assert len(events_service.requests) > 1, "la cola se debió reponer"
+    assert len(presented) >= 20, "el lote debe presentar al menos un suceso"
+    assert len(set(presented)) == len(presented), "SC-005: un suceso repetido"
+    assert len(events_service.requests) > 1, "el período se debió reponer"
 
 
 def test_the_backend_sends_the_birth_data_that_conditions_the_simulation(
@@ -222,8 +235,8 @@ def test_the_advance_survives_the_events_service_being_down(
 
     outcome = unreachable.advance_life(player_id=player_id)
 
-    assert outcome.event.source is EventSource.SEED
-    assert outcome.event.text and len(outcome.event.options) >= 2
+    assert outcome.events[0].source is EventSource.SEED
+    assert outcome.events[0].text and len(outcome.events[0].options) >= 2
     # La deriva natural se aplica aunque no haya suceso de época (FR-011).
     assert set(outcome.derived) == {"health", "happiness"}
     assert unreachable.get_life(player_id).age_months == 12
@@ -247,13 +260,14 @@ def test_a_generic_option_can_raise_health(born: Callable[..., str]) -> None:
     assert outcome.derived["health"] == 1
     before = outcome.life.stats.health
 
+    pending = outcome.events[0]
     positive = next(
         option
-        for option in outcome.event.options
+        for option in pending.options
         if option.scores.get("health", 0) > 0
     )
     decision = unreachable.submit_decision(
-        player_id=player_id, option_id=positive.id
+        player_id=player_id, event_id=pending.id, option_id=positive.id
     )
 
     assert decision.deltas["health"] > 0
@@ -284,8 +298,11 @@ def test_the_generic_fallback_respects_the_age_range(
     seen: list[tuple[int, str]] = []
     for _ in range(20):
         outcome = unreachable.advance_life(player_id=player_id)
-        seen.append((outcome.life.age_years, outcome.event.id))
-        unreachable.submit_decision(player_id=player_id, option_id="opt-2")
+        event = outcome.events[0]
+        seen.append((outcome.life.age_years, event.id))
+        unreachable.submit_decision(
+            player_id=player_id, event_id=event.id, option_id="opt-2"
+        )
 
     for age, event_id in seen:
         assert age >= min_age[event_id], f"{event_id} servido a los {age} años"
@@ -319,7 +336,7 @@ def test_reloading_with_an_undecided_event_resumes_it(
     try:
         advanced = client.post("/lives/advance")
         assert advanced.status_code == 200, advanced.text
-        event_id = advanced.json()["event"]["id"]
+        event_id = advanced.json()["events"][0]["id"]
 
         # El jugador recarga la página a mitad del período.
         resumed = client.get("/lives")
@@ -329,8 +346,16 @@ def test_reloading_with_an_undecided_event_resumes_it(
         # Y mientras no decida, no se le deja avanzar de largo el suceso.
         assert client.post("/lives/advance").status_code == 409
 
-        decided = client.post("/lives/decision", json={"option_id": "opt-1"})
-        assert decided.status_code == 200, decided.text
+        # Se resuelve el lote entero, un suceso por decisión (FR-007).
+        for _ in range(3):
+            pending = client.get("/lives").json()["pending_event"]
+            if pending is None:
+                break
+            decided = client.post(
+                "/lives/decision",
+                json={"event_id": pending["id"], "option_id": "opt-1"},
+            )
+            assert decided.status_code == 200, decided.text
 
         # Resuelto: nada pendiente y el siguiente avance vuelve a ir a 200.
         assert client.get("/lives").json()["pending_event"] is None

@@ -10,10 +10,10 @@ Dos apuntes sobre cómo se llega a cada estado:
   por otra que siempre sale mortal (`0.0 ≤ 0,01`, FR-005). Con un 1 % real
   la prueba sería una moneda al aire; el resto de la suite convive con la
   ruleta no mortal de `tests/conftest.py`.
-- **25 rondas no es un número al azar.** Con el catálogo de referencia, los
+- **25 períodos no es un número al azar.** Con el catálogo de referencia, los
   sucesos del año (`MAIN`, sistema `work`) sólo empiezan a salir a partir de
-  los 18 años y el quinto lote (`limit = 5`) llega en el avance 21: a las 25
-  rondas el historial ya tiene eventos de los tres sistemas agrupados (FR-020).
+  los 18 años: a los 25 períodos el historial ya tiene eventos de los tres
+  sistemas agrupados (FR-020).
 """
 
 from __future__ import annotations
@@ -51,17 +51,31 @@ def _client(player_id: str) -> TestClient:
     return client
 
 
+def _resolve_period(service: GameService, player_id: str, option_id: str) -> None:
+    """Resuelve el lote del período entero, un suceso por decisión (FR-007)."""
+    while not service.get_life(player_id).period_complete:
+        pending = service.get_life(player_id).pending_event
+        assert pending is not None, "período abierto sin suceso pendiente"
+        service.submit_decision(
+            player_id=player_id, event_id=pending.id, option_id=option_id
+        )
+
+
 def _play_until_death(
     service: GameService, player_id: str, monkeypatch
 ) -> None:
-    """24 rondas sin matar y la 25.ª ya con la ruleta mortal puesta."""
+    """24 períodos resueltos sin matar y la muerte en el 25.º."""
     for _ in range(ROUNDS - 1):
         service.advance_life(player_id=player_id)
-        service.submit_decision(player_id=player_id, option_id="opt-2")
+        _resolve_period(service, player_id, "opt-2")
 
     monkeypatch.setattr(domain_service, "random", _AlwaysFatalRng())
     service.advance_life(player_id=player_id)
-    outcome = service.submit_decision(player_id=player_id, option_id="opt-1")
+    pending = service.get_life(player_id).pending_event
+    assert pending is not None
+    outcome = service.submit_decision(
+        player_id=player_id, event_id=pending.id, option_id="opt-1"
+    )
 
     assert outcome.dead, "la vida debía morir en la 25.ª decisión"
     assert outcome.cause_of_death is CauseOfDeath.FATAL_RANDOM
@@ -115,11 +129,12 @@ def test_a_dead_life_only_answers_summary_and_delete(
     _play_until_death(service, player_id, monkeypatch)
     client = _client(player_id)
 
+    # Una vida muerta no admite avanzar ni decidir, pero sí resumen y borrado.
     assert client.post("/lives/advance").status_code == 409
-    assert (
-        client.post("/lives/decision", json={"option_id": "opt-1"}).status_code
-        == 409
+    dead = client.post(
+        "/lives/decision", json={"event_id": "cualquiera", "option_id": "opt-1"}
     )
+    assert dead.status_code == 409, dead.text
     assert client.delete("/lives").status_code == 204
 
 

@@ -49,14 +49,15 @@ import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from grpc_client.events import EventsClient, events_pb2
+from grpc_client.events import EventsClient
+from grpc_client.mapping import origin_is_seed, to_presented_event
 
 from persistence.lives_repo import LivesRepo
 
 from .catalog import validate_birth
-from .generic_events import generic_event
 from .errors import DomainError
-from .events import EventOption, EventSource, EventType, PresentedEvent
+from .events import EventOption, EventSource, PresentedEvent
+from .generic_events import generic_event
 from .models import (
     STAT_MIN,
     CauseOfDeath,
@@ -74,11 +75,10 @@ logger = logging.getLogger(__name__)
 #: FR-001 / Assumptions: el año de nacimiento aceptado empieza en 1900.
 MIN_BIRTH_YEAR = 1900
 
-#: FR-003a: eventos pedidos por consulta, según la granularidad de la vida.
-EVENTS_PER_PERIOD: dict[Granularity, int] = {
-    Granularity.YEAR: 5,
-    Granularity.MONTH: 2,
-}
+#: FR-007: sucesos que forman el lote de un período — un DAILY, un
+#: RELATIONSHIPS y, cuando toca, el MAIN del año. El microservicio nunca
+#: devuelve más que esto.
+BATCH_LIMIT = 3
 
 #: FR-011: deriva natural. La salud es una stat **jugable**: de joven se
 #: recupera (+1 punto por año cumplido hasta `HEALTH_PEAK_YEARS`) y en la
@@ -109,21 +109,23 @@ MAX_HIGHLIGHTS = 5
 
 @dataclass(frozen=True)
 class AdvanceOutcome:
-    """Resultado de `advance_life`: la vida, el evento y la deriva del período."""
+    """Resultado de `advance_life`: la vida, el lote del período y su deriva."""
 
     life: Life
-    event: PresentedEvent
+    events: list[PresentedEvent]
     derived: dict[str, int]
 
 
 @dataclass(frozen=True)
 class DecisionOutcome:
-    """Resultado de `submit_decision`: stats cambiadas y si ha muerto (FR-005)."""
+    """Resultado de `submit_decision`: stats, muerte y estado del período."""
 
     life: Life
     deltas: dict[str, int]
     dead: bool
     cause_of_death: CauseOfDeath | None
+    #: FR-007: `True` cuando la decisión resolvió el último suceso del lote.
+    period_complete: bool
 
 
 @dataclass(frozen=True)
@@ -178,40 +180,6 @@ def natural_drift(life: Life, months: int) -> dict[str, int]:
         "health": health,
         "happiness": random.randint(-HAPPINESS_FLUCTUATION, HAPPINESS_FLUCTUATION),
     }
-
-
-def _from_contract(
-    item: events_pb2.LifeEvent, *, year: int, source: EventSource
-) -> PresentedEvent | None:
-    """Traduce un suceso del contrato `events.v1` al dominio.
-
-    Devuelve `None` si no es jugable (sin enunciado o con un tipo que el
-    contrato no define): esos sucesos se descartan en vez de romper el
-    avance con una excepción.
-    """
-    if not item.text.strip():
-        return None
-    try:
-        event_type = EventType(events_pb2.EventType.Name(item.type))
-    except (ValueError, AttributeError):  # EVENT_TYPE_UNSPECIFIED u otro ajeno
-        return None
-    return PresentedEvent(
-        id=item.id,
-        type=event_type,
-        text=item.text,
-        options=[
-            EventOption(
-                id=option.id,
-                label=option.label,
-                fatal=option.fatal,
-                scores={score.stat: score.score for score in option.scores},
-            )
-            for option in item.options
-        ],
-        year=year,
-        source=source,
-        system=item.system,
-    )
 
 
 #: Nombres con los que nacen los padres (FR-014 pide nombre, no identidad).
@@ -308,36 +276,36 @@ class GameService:
     # --- US2: vivir la vida ------------------------------------------------
 
     def advance_life(self, *, player_id: str) -> AdvanceOutcome:
-        """Avanza un período, aplica la deriva natural y presenta **un** evento.
+        """Avanza un período, aplica la deriva y abre el lote de sucesos (FR-007).
 
-        `YEAR` suma 12 meses y `MONTH` suma 1 (FR-002). El evento queda en
-        `pending_event` hasta que se decida: mientras tanto no se puede
-        avanzar otra vez, porque el siguiente avance perdería el suceso.
+        `YEAR` suma 12 meses y `MONTH` suma 1 (FR-002). El período queda
+        **abierto** hasta resolver todo el lote: mientras quede algún suceso,
+        avanzar otra vez es un `409`, porque perdería los pendientes.
         """
         life = self.get_life(player_id)
         if not life.is_alive:
             raise DomainError("CONFLICT", "la vida ya terminó")
-        if life.pending_event is not None:
-            raise DomainError("CONFLICT", "hay un evento sin decidir todavía")
+        if not life.period_complete:
+            raise DomainError("CONFLICT", "el período todavía tiene sucesos")
 
         months = 12 if life.granularity is Granularity.YEAR else 1
         derived = natural_drift(life, months)
         life.stats.apply(derived)
         life.age_months += months
 
-        event = self._next_event(life)
-        life.pending_event = event
-        if event.id not in life.consumed_ids:
-            life.consumed_ids.append(event.id)
+        life.pending_batch = self._next_batch(life)
+        life.batch_cursor = 0
 
         life.touch()
         self._repo.put_state(life)
-        return AdvanceOutcome(life=life, event=event, derived=derived)
+        return AdvanceOutcome(
+            life=life, events=list(life.pending_batch), derived=derived
+        )
 
     def submit_decision(
-        self, *, player_id: str, option_id: str
+        self, *, player_id: str, event_id: str, option_id: str
     ) -> DecisionOutcome:
-        """Aplica la opción elegida sobre las stats y resuelve el período (FR-005)."""
+        """Resuelve el suceso pendiente del lote y avanza el cursor (FR-007)."""
         life = self.get_life(player_id)
         if not life.is_alive:
             raise DomainError("CONFLICT", "la vida ya terminó")
@@ -345,6 +313,12 @@ class GameService:
         event = life.pending_event
         if event is None:
             raise DomainError("CONFLICT", "no hay ningún evento pendiente")
+        if event_id != event.id:
+            # El contrato exige decidir sobre `pending_batch[batch_cursor]`.
+            raise DomainError(
+                "CONFLICT",
+                f"el evento {event_id!r} no es el pendiente ({event.id!r})",
+            )
 
         option = event.option(option_id)  # desconocida → INVALID_ARGUMENT (422)
         # El microservicio envía scores; el dominio los convierte en puntos con
@@ -367,12 +341,19 @@ class GameService:
             fatal=option.fatal,
             source=event.source,
         )
-        life.pending_event = None
+        # FR-007: el suceso resuelto queda consumido y el cursor pasa al
+        # siguiente; el período se cierra cuando no queda ninguno.
+        if event.id not in life.consumed_ids:
+            life.consumed_ids.append(event.id)
+        life.batch_cursor += 1
 
         cause = self._cause_of_death(life, option)
         if cause is not None:
             life.status = LifeStatus.DEAD
             life.cause_of_death = cause
+            # Morir a mitad de lote cierra el período: los sucesos que quedaban
+            # ya no se presentan.
+            del life.pending_batch[life.batch_cursor :]
 
         life.touch()
         # El estado primero: si falla después, el evento ya dejó de estar
@@ -385,6 +366,7 @@ class GameService:
             deltas=deltas,
             dead=not life.is_alive,
             cause_of_death=cause,
+            period_complete=life.period_complete,
         )
 
     # --- US3: cierre de la vida -------------------------------------------
@@ -451,36 +433,40 @@ class GameService:
 
     # --- US2: obtención de sucesos ---------------------------------------
 
-    def _next_event(self, life: Life) -> PresentedEvent:
-        """Saca de `reserve[]`; sólo consulta al microservicio al vaciarse."""
-        if life.reserve:
-            return life.reserve.pop(0)
+    def _next_batch(self, life: Life) -> list[PresentedEvent]:
+        """El lote del período: lo que sirve el microservicio o el genérico.
 
+        Nunca devuelve una lista vacía: el avance **jamás** deja la partida sin
+        suceso (edge cases de la spec). La antigua reserva de un solo evento
+        desaparece: el lote entero se presenta de una vez y se resuelve en orden
+        (FR-007).
+        """
         served = self._fetch_events(life)
-        if not served:
-            # Edge case de la spec: estado controlado, nunca un error que
-            # bloquee la partida (ni un evento inexistente que rompa el contrato).
-            return generic_event(
+        if served:
+            return served
+        # Edge case de la spec: estado controlado, nunca un error que bloquee la
+        # partida (ni un evento inexistente que rompa el contrato).
+        return [
+            generic_event(
                 life.consumed_ids,
                 year=life.current_year,
                 age_years=life.age_years,
                 period_index=life.period_index,
                 country=life.country,
             )
-
-        life.reserve = served[1:]
-        return served[0]
+        ]
 
     def _fetch_events(self, life: Life) -> list[PresentedEvent]:
-        """`GetEvents` con el `limit` de la granularidad y lo ya servido."""
-        limit = EVENTS_PER_PERIOD[life.granularity]
-        excluded = set(life.consumed_ids) | {event.id for event in life.reserve}
+        """`GetEvents` del lote del período, sin repetir lo ya servido."""
+        excluded = set(life.consumed_ids) | {
+            event.id for event in life.pending_batch
+        }
 
         try:
             response = self.events.get_events(
                 year=life.current_year,
                 age_years=life.age_years,
-                limit=limit,
+                limit=BATCH_LIMIT,
                 gender=life.gender.value,
                 country=life.country,
                 city=life.city,
@@ -488,21 +474,21 @@ class GameService:
             )
         except Exception:  # noqa: BLE001 - el microservicio puede fallar de todo
             logger.warning(
-                "events.v1 no responde para %s; se continúa con sucesos genéricos",
+                "events.v2 no responde para %s; se continúa con sucesos genéricos",
                 life.player_id,
                 exc_info=True,
             )
             return []
 
-        source = (
-            EventSource.SEED
-            if response.origin == events_pb2.SEED
-            else EventSource.WIKIPEDIA
-        )
+        source = EventSource.SEED if origin_is_seed(response) else EventSource.WIKIPEDIA
         served = [
             presented
             for item in response.events
-            if (presented := _from_contract(item, year=response.year, source=source))
+            if (
+                presented := to_presented_event(
+                    item, year=response.year, source=source
+                )
+            )
             is not None
         ]
         # Defensa de SC-005: aunque el servicio llegara a repetir, la vida no.

@@ -117,6 +117,8 @@ class PresentedEventModel(BaseModel):
     text: str
     year: int | None = None
     source: EventSource
+    #: FR-002: país del suceso, para que el navegador pueda mostrarlo.
+    country: str = ""
     options: list[EventOptionModel]
 
 
@@ -164,10 +166,18 @@ class DerivedModel(BaseModel):
 
 
 class AdvanceResponse(BaseModel):
+    """`POST /lives/advance`: abre el período y presenta su **lote** (FR-007)."""
+
     model_config = ConfigDict(extra="forbid")
 
     life: LifeModel
-    event: PresentedEventModel
+    #: Edad en años cumplidos al abrir el período (comodidad para la interfaz).
+    age_years: int
+    #: El lote: de 1 a 3 sucesos (un DAILY, un RELATIONSHIPS y el MAIN del año).
+    events: list[PresentedEventModel]
+    #: Siempre `False` justo después de avanzar, porque el avance **abre** un
+    #: lote; existe para que las dos respuestas compartan el estado del período.
+    period_complete: bool
     derived: DerivedModel
 
 
@@ -176,6 +186,8 @@ class DecisionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    #: FR-007: debe ser el suceso pendiente, `pending_batch[batch_cursor]`.
+    event_id: str
     option_id: str
 
 
@@ -186,6 +198,8 @@ class DecisionResponse(BaseModel):
     deltas: dict[str, int]
     dead: bool
     cause_of_death: CauseOfDeath | None = None
+    #: `True` cuando esta decisión resolvió el último suceso del período.
+    period_complete: bool
 
 
 class SystemDigestModel(BaseModel):
@@ -290,6 +304,7 @@ def _event_model(event: PresentedEvent) -> PresentedEventModel:
         text=event.text,
         year=event.year,
         source=event.source,
+        country=event.country,
         options=[
             EventOptionModel(
                 id=option.id, label=option.label, fatal=option.fatal
@@ -462,15 +477,17 @@ def _build_app(repo: LivesRepo) -> FastAPI:
         response_model=AdvanceResponse,
         operation_id="advanceLife",
         summary=(
-            "Avanza un período, aplica la deriva natural y presenta un único "
-            "evento con sus opciones (FR-002, FR-003, FR-011)"
+            "Avanza un período, aplica la deriva natural y abre el lote de "
+            "sucesos del período (FR-002, FR-007, FR-011)"
         ),
     )
     def advance_life(player_id: str = Depends(require_player_id)) -> AdvanceResponse:
         outcome = service.advance_life(player_id=player_id)
         return AdvanceResponse(
             life=_life_model(outcome.life),
-            event=_event_model(outcome.event),
+            age_years=outcome.life.age_years,
+            events=[_event_model(event) for event in outcome.events],
+            period_complete=outcome.life.period_complete,
             derived=DerivedModel(**outcome.derived),
         )
 
@@ -479,8 +496,8 @@ def _build_app(repo: LivesRepo) -> FastAPI:
         response_model=DecisionResponse,
         operation_id="submitDecision",
         summary=(
-            "Registra la opción elegida, aplica los deltas sobre las stats y "
-            "resuelve la muerte si procede (FR-003, FR-004, FR-005)"
+            "Resuelve el suceso pendiente del período: aplica sus puntos, "
+            "avanza el cursor y resuelve la muerte si procede (FR-005, FR-007)"
         ),
     )
     def submit_decision(
@@ -488,13 +505,18 @@ def _build_app(repo: LivesRepo) -> FastAPI:
         player_id: str = Depends(require_player_id),
     ) -> DecisionResponse:
         outcome = service.submit_decision(
-            player_id=player_id, option_id=payload.option_id
+            player_id=player_id,
+            event_id=payload.event_id,
+            option_id=payload.option_id,
         )
         return DecisionResponse(
-            life=_life_model(outcome.life),
+            # `with_pending`: la respuesta lleva el **siguiente** suceso del
+            # lote, para que la interfaz no tenga que volver a preguntar.
+            life=_life_model(outcome.life, with_pending=True),
             deltas=outcome.deltas,
             dead=outcome.dead,
             cause_of_death=outcome.cause_of_death,
+            period_complete=outcome.period_complete,
         )
 
     @app.get(

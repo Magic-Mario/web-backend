@@ -138,30 +138,46 @@ def test_create_life_returns_initial_stats_and_parents() -> None:
 
 
 def test_create_advance_decision_roundtrip() -> None:
-    """US2 · FR-002, FR-003, FR-004, FR-011: avance con un evento y decisión."""
+    """US2 · FR-002, FR-007, FR-011: el período abre un lote y se resuelve en orden."""
     client = _client()
-    life = _new_life(client)
+    _new_life(client)
 
     advanced = client.post("/lives/advance")
     assert advanced.status_code == 200, advanced.text
     body = advanced.json()
 
-    # FR-002: la edad avanza y la granularidad YEAR suma 12 meses.
+    # FR-002: la edad avanza (la granularidad YEAR suma 12 meses).
     assert body["life"]["age_months"] == 12, body["life"]
-    # FR-003: exactamente un evento, con al menos dos opciones.
-    assert body["event"]["options"], body["event"]
-    assert len(body["event"]["options"]) >= 2, body["event"]
+    assert body["age_years"] == 1, body
+
+    # FR-007: el lote trae de 1 a 3 sucesos, cada uno con 2–4 opciones.
+    events = body["events"]
+    assert 1 <= len(events) <= 3, events
+    for event in events:
+        assert event["country"], "FR-002: cada suceso declara su país"
+        assert len(event["options"]) >= 2, event
+
     # FR-011: la deriva natural se informa por separado de los eventos.
     assert isinstance(body.get("derived"), dict), body.get("derived")
+    # El avance **abre** el período, así que todavía no está completo (FR-007).
+    assert body["period_complete"] is False, body
+    # Y con el período abierto, avanzar otra vez es un 409.
+    assert client.post("/lives/advance").status_code == 409
 
-    decided = client.post("/lives/decision", json={"option_id": "opt-1"})
-    assert decided.status_code == 200, decided.text
-    decision = decided.json()
-    # SC-003: toda decisión cambia algo observable.
-    assert decision["deltas"], decision
-    assert "dead" in decision, decision
+    # Se resuelve el lote entero: un suceso por decisión (FR-007).
+    for index, event in enumerate(events):
+        decided = client.post(
+            "/lives/decision", json={"event_id": event["id"], "option_id": "opt-1"}
+        )
+        assert decided.status_code == 200, decided.text
+        decision = decided.json()
+        # SC-003: toda decisión cambia algo observable.
+        assert decision["deltas"], decision
+        assert "dead" in decision, decision
+        # El período se cierra con la última decisión, y sólo con ella.
+        assert decision["period_complete"] is (index == len(events) - 1), decision
 
-    # Un segundo avance debe servir otro evento (SC-005, sin atascarse).
+    # Resuelto el período, el siguiente avance vuelve a ir a 200.
     second = client.post("/lives/advance")
     assert second.status_code == 200, second.text
     assert second.json()["life"]["age_months"] == 24, second.json()["life"]

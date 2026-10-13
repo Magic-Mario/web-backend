@@ -300,31 +300,61 @@ def test_the_annual_health_loss_is_the_same_in_both_granularities() -> None:
     assert yearly["health"] == monthly == -3
 
 
-def test_the_event_limit_is_set_by_the_granularity() -> None:
-    """FR-003a: 2 sucesos con granularidad mensual y 5 con anual."""
-    from domain.service import EVENTS_PER_PERIOD
+def test_the_batch_is_a_fixed_size_whatever_the_granularity() -> None:
+    """FR-007: el lote son como mucho tres sucesos, en las dos escalas."""
+    from domain.service import BATCH_LIMIT
 
-    assert EVENTS_PER_PERIOD[Granularity.MONTH] == 2
-    assert EVENTS_PER_PERIOD[Granularity.YEAR] == 5
+    assert BATCH_LIMIT == 3
 
 
-def test_reserve_pending_and_consumed_survive_a_reload() -> None:
-    """data-model §1: la cola y el evento pendiente viajan en el estado."""
+def test_the_batch_the_cursor_and_consumed_survive_a_reload() -> None:
+    """data-model §1: el lote, el cursor y lo consumido viajan en el estado."""
     life = _life(
         age_months=36,
-        reserve=[_event("ev-2"), _event("ev-1")],
-        pending_event=_event("ev-0"),
-        consumed_ids=["ev-0"],
+        pending_batch=[_event("ev-1"), _event("ev-2"), _event("ev-3")],
+        batch_cursor=1,
+        consumed_ids=["ev-0", "ev-1"],
     )
 
     restored = Life.from_dict(life.to_dict())
 
-    assert [event.id for event in restored.reserve] == ["ev-2", "ev-1"]
+    assert [event.id for event in restored.pending_batch] == [
+        "ev-1",
+        "ev-2",
+        "ev-3",
+    ]
+    assert restored.batch_cursor == 1
+    # `pending_event` es **derivado**: el del cursor, no una copia guardada.
     assert restored.pending_event is not None
-    assert restored.pending_event.id == "ev-0"
-    assert restored.consumed_ids == ["ev-0"]
-    # Los `deltas` se quedan en el servidor, pero no se pierden (data-model §2).
-    assert restored.reserve[0].option("opt-1").scores == {"health": 5}
+    assert restored.pending_event.id == "ev-2"
+    assert restored.period_complete is False
+    assert restored.consumed_ids == ["ev-0", "ev-1"]
+    # Los `scores` se quedan en el servidor, pero no se pierden (data-model §2).
+    assert restored.pending_batch[0].option("opt-1").scores == {"health": 5}
+
+
+def test_a_legacy_row_with_reserve_becomes_a_batch() -> None:
+    """Migración: una fila de 002 (`reserve[]` + `pending_event`) se reordena.
+
+    La partida a medias **no** se pierde: el suceso que estaba pendiente pasa a
+    ser `pending_batch[0]` con el cursor a 0, y la antigua reserva le sigue.
+    """
+    legacy = _life().to_dict()
+    legacy["pending_event"] = _event("ev-pending").to_dict()
+    legacy["reserve"] = [_event("ev-2").to_dict(), _event("ev-3").to_dict()]
+    legacy.pop("pending_batch", None)
+    legacy.pop("batch_cursor", None)
+
+    restored = Life.from_dict(legacy)
+
+    assert [event.id for event in restored.pending_batch] == [
+        "ev-pending",
+        "ev-2",
+        "ev-3",
+    ]
+    assert restored.batch_cursor == 0
+    assert restored.pending_event is not None
+    assert restored.pending_event.id == "ev-pending"
 
 
 def test_granularity_stays_fixed_for_the_whole_life() -> None:
@@ -344,7 +374,9 @@ def test_granularity_stays_fixed_for_the_whole_life() -> None:
     try:
         for _ in range(3):
             service.advance_life(player_id=player_id)
-            service.submit_decision(player_id=player_id, option_id="opt-2")
+            # Cada período tiene su lote: se resuelve entero antes de avanzar.
+            while not service.get_life(player_id).period_complete:
+                _decide(service, player_id, "opt-2")
 
         life = service.get_life(player_id)
         assert life.granularity is Granularity.MONTH
@@ -354,10 +386,8 @@ def test_granularity_stays_fixed_for_the_whole_life() -> None:
         service.repo.delete_state(player_id)
 
 
-def test_the_monthly_reserve_is_used_up_before_asking_again(
-    events_service: object,
-) -> None:
-    """Decisión 5 con `limit = 2`: la tercera consulta sí toca la red."""
+def test_a_monthly_period_is_also_one_batch(events_service: object) -> None:
+    """FR-007 con granularidad mensual: un lote por mes, y el límite es 3."""
     from domain.service import GameService
 
     service = GameService()
@@ -372,24 +402,22 @@ def test_the_monthly_reserve_is_used_up_before_asking_again(
     )
     try:
         first = service.advance_life(player_id=player_id)
-        assert len(first.life.reserve) == 1  # 1 presentado + 1 en reserva
-        service.submit_decision(player_id=player_id, option_id="opt-2")
+        assert 1 <= len(first.events) <= 3
+        assert len(events_service.requests) == 1
+        assert events_service.requests[0].limit == 3
+
+        # Mientras quede un suceso del lote, no se vuelve a consultar (FR-007).
+        for _ in range(len(first.events) - 1):
+            _decide(service, player_id, "opt-2")
         assert len(events_service.requests) == 1
 
-        second = service.advance_life(player_id=player_id)
-        assert len(second.life.reserve) == 0  # se gastó sin volver a consultar
-        service.submit_decision(player_id=player_id, option_id="opt-2")
-        assert len(events_service.requests) == 1
-
-        third = service.advance_life(player_id=player_id)
-        assert len(third.life.reserve) == 1  # y ahora sí hubo que reponer
+        # Cerrado el período, el siguiente avance sí consulta…
+        _decide(service, player_id, "opt-2")
+        service.advance_life(player_id=player_id)
         assert len(events_service.requests) == 2
-        assert events_service.requests[1].limit == 2
-        # SC-005: nada de lo ya servido vuelve a pedirse.
-        assert set(events_service.requests[1].exclude_ids) >= {
-            first.event.id,
-            second.event.id,
-        }
+        # …y SC-005: nada de lo ya servido vuelve a pedirse.
+        served = {event.id for event in first.events}
+        assert set(events_service.requests[1].exclude_ids) >= served
     finally:
         service.repo.delete_state(player_id)
 
@@ -415,6 +443,15 @@ class _FixedRng:
         return getattr(_random, name)
 
 
+def _decide(service, player_id: str, option_id: str = "opt-2"):
+    """Decide el suceso pendiente (FR-007: el contrato pide su `event_id`)."""
+    pending = service.get_life(player_id).pending_event
+    assert pending is not None, "no hay suceso pendiente"
+    return service.submit_decision(
+        player_id=player_id, event_id=pending.id, option_id=option_id
+    )
+
+
 def _kill_by_random(
     service: GameService, born, monkeypatch, granularity: str = "YEAR"
 ) -> str:
@@ -422,7 +459,7 @@ def _kill_by_random(
     player_id = born(granularity)
     monkeypatch.setattr(domain_service, "random", _FixedRng(0.0))
     service.advance_life(player_id=player_id)
-    outcome = service.submit_decision(player_id=player_id, option_id="opt-1")
+    outcome = _decide(service, player_id, "opt-1")
     assert outcome.dead and outcome.cause_of_death is CauseOfDeath.FATAL_RANDOM
     return player_id
 
@@ -457,7 +494,7 @@ def test_health_zero_ends_the_life(service: GameService, born) -> None:
     assert outcome_advance.derived["health"] == -3
     assert outcome_advance.life.stats.health == 0
 
-    outcome = service.submit_decision(player_id=player_id, option_id="opt-2")
+    outcome = _decide(service, player_id, "opt-2")
 
     assert outcome.dead
     assert outcome.cause_of_death is CauseOfDeath.HEALTH_ZERO
@@ -474,13 +511,14 @@ def test_a_fatal_option_ends_the_life(service: GameService, born) -> None:
     pending = life.pending_event
     # Ni el evento ni sus opciones son mutables: se rehace el pendiente con
     # la primera opción marcada como mortal, que es como llega del catálogo.
+    # `pending_event` es derivado, así que se sustituye en el lote.
     fatal_first = replace(pending.options[0], fatal=True)
-    life.pending_event = replace(
+    life.pending_batch[life.batch_cursor] = replace(
         pending, options=[fatal_first, *pending.options[1:]]
     )
     service.repo.put_state(life)
 
-    outcome = service.submit_decision(player_id=player_id, option_id=fatal_first.id)
+    outcome = _decide(service, player_id, fatal_first.id)
 
     assert outcome.dead
     assert outcome.cause_of_death is CauseOfDeath.FATAL_OPTION
@@ -510,7 +548,7 @@ def test_the_random_roll_uses_the_probability_of_the_granularity(
     service.advance_life(player_id=player_id)
     monkeypatch.setattr(domain_service, "random", _FixedRng(roll))
 
-    outcome = service.submit_decision(player_id=player_id, option_id="opt-2")
+    outcome = _decide(service, player_id, "opt-2")
 
     assert outcome.dead is dies, f"{granularity.value} con tirada {roll}"
     assert (outcome.cause_of_death is CauseOfDeath.FATAL_RANDOM) is dies
@@ -530,8 +568,8 @@ def test_there_is_no_age_ceiling(
     assert outcome.life.age_years == 131
     # A esa edad no queda suceso elegible → genérico en lugar de un error
     # (edge case 104, `domain/generic_events.py`).
-    assert outcome.event.source is EventSource.SEED
-    assert outcome.event.options
+    assert outcome.events[0].source is EventSource.SEED
+    assert outcome.events[0].options
 
 
 # --- Resumen de fin de vida: se calcula, no se guarda (FR-005 · T066) ------
